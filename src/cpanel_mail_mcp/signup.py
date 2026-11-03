@@ -65,7 +65,7 @@ def _page(title: str, body: str) -> bytes:
 
 
 def _form_html(values: dict[str, str] | None = None, error: str = "") -> bytes:
-    v = {"imap_port": "993", "smtp_port": "465", **(values or {})}
+    v = {"imap_port": "993", "smtp_port": "587", **(values or {})}
 
     def val(k: str) -> str:
         return html.escape(v.get(k, ""), quote=True)
@@ -163,7 +163,7 @@ def _parse(fields: dict[str, str]) -> dict:
         "imap_host": imap_host,
         "imap_port": _port(fields.get("imap_port", "993").strip() or "993", "IMAP"),
         "smtp_host": smtp_host,
-        "smtp_port": _port(fields.get("smtp_port", "465").strip() or "465", "SMTP"),
+        "smtp_port": _port(fields.get("smtp_port", "587").strip() or "587", "SMTP"),
         "from_name": fields.get("from_name", "").strip()[:200] or None,
     }
 
@@ -276,7 +276,19 @@ class SignupASGI:
             _check_public(f["imap_host"], f["imap_port"])
             if check_smtp:
                 _check_public(smtp_host, f["smtp_port"])
-            return self._verify(_from_dict(account), check_smtp=check_smtp)
+            try:
+                return self._verify(_from_dict(account), check_smtp=check_smtp)
+            except MailServerUnreachable as e:
+                # Many hosting providers (Hetzner among them) block outbound 465;
+                # submission on 587 with STARTTLS reaches the same mailbox.
+                if not (e.protocol == "smtp" and account["smtp_port"] == 465 and not e.cert_error):
+                    raise
+                account["smtp_port"] = 587
+                try:
+                    return self._verify(_from_dict(account), check_smtp=check_smtp)
+                except MailServerUnreachable:
+                    account["smtp_port"] = 465  # report what the student typed
+                    raise e from None
 
         try:
             info = await anyio.to_thread.run_sync(check)
@@ -289,14 +301,18 @@ class SignupASGI:
         except MailServerUnreachable as e:
             self._throttle.failure(f["email"])
             host, port = ((f["imap_host"], f["imap_port"]) if e.protocol == "imap"
-                          else (smtp_host, f["smtp_port"]))
+                          else (smtp_host, account["smtp_port"]))
             log.info("alta sin conexión: %s (%s %s:%s)", f["email"], e.protocol, host, port)
             if e.cert_error:
                 raise _Bad(422, f"El certificado de seguridad de {host} no corresponde a ese nombre. "
                                 "Usa el nombre de servidor que indica tu proveedor (a veces es el "
                                 "del hosting, no mail.tudominio).") from None
-            raise _Bad(422, f"No se ha podido conectar con {host}:{port}. Revisa el servidor y el "
-                            "puerto que indica tu proveedor para IMAP (suele ser imap.…, puerto 993).") from None
+            if e.protocol == "imap":
+                raise _Bad(422, f"No se ha podido conectar con {host}:{port}. Revisa el servidor y el "
+                                "puerto que indica tu proveedor para IMAP (suele ser imap.…, puerto 993).") from None
+            raise _Bad(422, f"No se ha podido conectar con {host}:{port}. Revisa el servidor de salida "
+                            "que indica tu proveedor (suele ser smtp.…, puerto 587). Si solo vas a leer "
+                            "correo, deja el servidor de salida vacío.") from None
 
         self._throttle.success(f["email"])
         account.update(sent_folder=info.sent_folder, drafts_folder=info.drafts_folder,

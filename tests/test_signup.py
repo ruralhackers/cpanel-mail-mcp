@@ -250,3 +250,31 @@ def test_certificate_error_message(env):
     env.state["fail"] = MailServerUnreachable("imap", cert_error=True)
     r = _req(env.app, "POST", data=_form())
     assert r.status_code == 422 and "certificado" in r.text
+
+
+def test_smtp_465_unreachable_falls_back_to_587(env, monkeypatch):
+    """Many hosts (Hetzner) block outbound 465: retry submission on 587."""
+    from cpanel_mail_mcp.mailcheck import MailServerUnreachable
+
+    def verify(acct, *, check_smtp):
+        env.calls.append((acct, check_smtp))
+        if check_smtp and acct.smtp_port == 465:
+            raise MailServerUnreachable("smtp")
+        return MailboxInfo("S", "D", None, True)
+    env.app._verify = verify
+    r = _req(env.app, "POST", data=_form(smtp_host="smtp.ex.com", smtp_port="465"))
+    assert r.status_code == 200, r.text
+    assert [c[0].smtp_port for c in env.calls] == [465, 587]
+    assert next(iter(users_mod.load_users().values())).smtp_port == 587
+
+
+def test_smtp_unreachable_message_is_about_smtp(env):
+    from cpanel_mail_mcp.mailcheck import MailServerUnreachable
+    env.state["fail"] = MailServerUnreachable("smtp")
+    r = _req(env.app, "POST", data=_form(smtp_host="smtp.ex.com", smtp_port="587"))
+    assert r.status_code == 422
+    assert "smtp.ex.com:587" in r.text and "IMAP" not in r.text.split("alert")[1].split("</div>")[0]
+
+
+def test_form_defaults_smtp_587(env):
+    assert 'name="smtp_port" inputmode="numeric" value="587"' in _req(env.app, "GET").text
