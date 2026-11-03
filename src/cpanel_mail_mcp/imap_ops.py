@@ -12,7 +12,6 @@ import email
 import imaplib
 import os
 import re
-import socket
 import ssl
 import time
 from contextlib import contextmanager
@@ -65,12 +64,12 @@ class _PinnedIMAP4_SSL(imaplib.IMAP4_SSL):
     """IMAP4_SSL that dials an already-checked address (see `netguard`) while
     TLS still verifies the certificate against the host name."""
 
-    def __init__(self, ip: str, *args, **kwargs) -> None:
-        self._pinned_ip = ip
+    def __init__(self, addrs: list[str], *args, **kwargs) -> None:
+        self._pinned = addrs
         super().__init__(*args, **kwargs)
 
     def _create_socket(self, timeout):
-        sock = socket.create_connection((self._pinned_ip, self.port), timeout)
+        sock = netguard.connect(self._pinned, self.port, timeout)
         return self.ssl_context.wrap_socket(sock, server_hostname=self.host)
 
 
@@ -86,11 +85,11 @@ def _login(m: imaplib.IMAP4, a: Account) -> None:
 
 def _connect(a: Account) -> imaplib.IMAP4_SSL:
     ctx = ssl.create_default_context()
-    ip = netguard.pin(a.imap_host, a.imap_port)
-    if ip is None:
+    addrs = netguard.pin(a.imap_host, a.imap_port)
+    if addrs is None:
         m = imaplib.IMAP4_SSL(a.imap_host, a.imap_port, ssl_context=ctx, timeout=_timeout())
     else:
-        m = _PinnedIMAP4_SSL(ip, a.imap_host, a.imap_port, ssl_context=ctx, timeout=_timeout())
+        m = _PinnedIMAP4_SSL(addrs, a.imap_host, a.imap_port, ssl_context=ctx, timeout=_timeout())
     try:
         _login(m, a)
     except Exception:

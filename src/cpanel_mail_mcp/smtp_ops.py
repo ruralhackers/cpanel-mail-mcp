@@ -6,7 +6,6 @@ import base64
 import mimetypes
 import os
 import smtplib
-import socket
 import ssl
 from email.message import EmailMessage
 from email.utils import formataddr, formatdate, getaddresses, make_msgid
@@ -54,24 +53,24 @@ def _attachment_limit_bytes() -> int:
 class _PinnedSMTP(smtplib.SMTP):
     """SMTP (STARTTLS) that dials an already-checked address (see `netguard`)."""
 
-    def __init__(self, ip: str, *args, **kwargs) -> None:
-        self._pinned_ip = ip
+    def __init__(self, addrs: list[str], *args, **kwargs) -> None:
+        self._pinned = addrs
         super().__init__(*args, **kwargs)
 
     def _get_socket(self, host, port, timeout):
-        return socket.create_connection((self._pinned_ip, port), timeout, self.source_address)
+        return netguard.connect(self._pinned, port, timeout, self.source_address)
 
 
 class _PinnedSMTP_SSL(smtplib.SMTP_SSL):
     """SMTP over implicit TLS that dials an already-checked address; the
     certificate is still verified against the host name."""
 
-    def __init__(self, ip: str, *args, **kwargs) -> None:
-        self._pinned_ip = ip
+    def __init__(self, addrs: list[str], *args, **kwargs) -> None:
+        self._pinned = addrs
         super().__init__(*args, **kwargs)
 
     def _get_socket(self, host, port, timeout):
-        sock = socket.create_connection((self._pinned_ip, port), timeout, self.source_address)
+        sock = netguard.connect(self._pinned, port, timeout, self.source_address)
         return self.context.wrap_socket(sock, server_hostname=self._host)
 
 
@@ -90,18 +89,18 @@ def _login(s: smtplib.SMTP, a: Account) -> None:
 
 def _connect(a: Account) -> smtplib.SMTP | smtplib.SMTP_SSL:
     ctx = ssl.create_default_context()
-    ip = netguard.pin(a.smtp_host, a.smtp_port)
+    addrs = netguard.pin(a.smtp_host, a.smtp_port)
     if a.smtp_port == 465:
-        if ip is None:
+        if addrs is None:
             s: smtplib.SMTP | smtplib.SMTP_SSL = smtplib.SMTP_SSL(
                 a.smtp_host, a.smtp_port, context=ctx, timeout=30)
         else:
-            s = _PinnedSMTP_SSL(ip, a.smtp_host, a.smtp_port, context=ctx, timeout=30)
+            s = _PinnedSMTP_SSL(addrs, a.smtp_host, a.smtp_port, context=ctx, timeout=30)
     else:
-        if ip is None:
+        if addrs is None:
             s = smtplib.SMTP(a.smtp_host, a.smtp_port, timeout=30)
         else:
-            s = _PinnedSMTP(ip, a.smtp_host, a.smtp_port, timeout=30)
+            s = _PinnedSMTP(addrs, a.smtp_host, a.smtp_port, timeout=30)
         s.ehlo()
         s.starttls(context=ctx)
         s.ehlo()

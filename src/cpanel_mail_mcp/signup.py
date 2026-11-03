@@ -292,10 +292,11 @@ class SignupASGI:
                           else (smtp_host, f["smtp_port"]))
             log.info("alta sin conexión: %s (%s %s:%s)", f["email"], e.protocol, host, port)
             if e.cert_error:
-                raise _Bad(502, f"El certificado de seguridad de {host} no corresponde a ese nombre. "
+                raise _Bad(422, f"El certificado de seguridad de {host} no corresponde a ese nombre. "
                                 "Usa el nombre de servidor que indica tu proveedor (a veces es el "
                                 "del hosting, no mail.tudominio).") from None
-            raise _Bad(502, f"No se ha podido conectar con {host}:{port}.") from None
+            raise _Bad(422, f"No se ha podido conectar con {host}:{port}. Revisa el servidor y el "
+                            "puerto que indica tu proveedor para IMAP (suele ser imap.…, puerto 993).") from None
 
         self._throttle.success(f["email"])
         account.update(sent_folder=info.sent_folder, drafts_folder=info.drafts_folder,

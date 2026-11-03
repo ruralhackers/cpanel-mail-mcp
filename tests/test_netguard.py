@@ -112,3 +112,23 @@ def test_imap_verifies_tls_certificates(monkeypatch):
     with pytest.raises(OSError):
         imap_ops._connect(_acct())
     assert seen["ctx"].verify_mode == ssl.CERT_REQUIRED and seen["ctx"].check_hostname
+
+
+def test_pinned_connect_falls_back_to_next_checked_address(guard_on, monkeypatch):
+    """Host publishes IPv6 first but the container has no IPv6: try the IPv4 too."""
+    monkeypatch.setattr(socket, "getaddrinfo", lambda h, p, *a, **k: [
+        (socket.AF_INET6, 1, 6, "", ("2606:4700::1", p, 0, 0)),
+        (socket.AF_INET, 1, 6, "", ("93.184.216.34", p))])
+    dialed = []
+
+    def create_connection(address, *a, **k):
+        dialed.append(address[0])
+        raise OSError(101, "Network is unreachable")
+    monkeypatch.setattr(socket, "create_connection", create_connection)
+    with pytest.raises(OSError):
+        imap_ops._connect(_acct())
+    assert dialed == ["2606:4700::1", "93.184.216.34"]
+    dialed.clear()
+    with pytest.raises(OSError):
+        smtp_ops._connect(_acct())
+    assert dialed == ["2606:4700::1", "93.184.216.34"]

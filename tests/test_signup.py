@@ -172,7 +172,7 @@ def test_unreachable_502(env):
     from cpanel_mail_mcp.mailcheck import MailServerUnreachable
     env.state["fail"] = MailServerUnreachable("imap")
     r = _req(env.app, "POST", data=_form())
-    assert r.status_code == 502 and "mail.ex.com:993" in r.text
+    assert r.status_code == 422 and "mail.ex.com:993" in r.text
 
 
 def test_html_escaped(env):
@@ -241,7 +241,7 @@ def test_unreachable_counts_as_failure(env):
     from cpanel_mail_mcp.mailcheck import MailServerUnreachable
     env.state["fail"] = MailServerUnreachable("imap")
     for _ in range(5):
-        assert _req(env.app, "POST", data=_form()).status_code == 502
+        assert _req(env.app, "POST", data=_form()).status_code == 422
     assert _req(env.app, "POST", data=_form()).status_code == 429
 
 
@@ -249,4 +249,4 @@ def test_certificate_error_message(env):
     from cpanel_mail_mcp.mailcheck import MailServerUnreachable
     env.state["fail"] = MailServerUnreachable("imap", cert_error=True)
     r = _req(env.app, "POST", data=_form())
-    assert r.status_code == 502 and "certificado" in r.text
+    assert r.status_code == 422 and "certificado" in r.text

@@ -33,16 +33,32 @@ def _is_public(addr: str) -> bool:
     return ip.is_global and not ip.is_multicast
 
 
-def resolve_public(host: str, port: int) -> str:
-    """Resolve `host`; return its first address, or raise PrivateHost if any
+def resolve_public_all(host: str, port: int) -> list[str]:
+    """Resolve `host`; return all its addresses, or raise PrivateHost if any
     address is not public. DNS errors propagate as OSError."""
     infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    addrs = [i[4][0] for i in infos]
+    addrs = list(dict.fromkeys(i[4][0] for i in infos))
     if not addrs or not all(_is_public(a) for a in addrs):
         raise PrivateHost(host)
-    return addrs[0]
+    return addrs
 
 
-def pin(host: str, port: int) -> str | None:
-    """The address to dial for `host` when the guard is on, else None."""
-    return resolve_public(host, port) if _enabled else None
+def resolve_public(host: str, port: int) -> str:
+    return resolve_public_all(host, port)[0]
+
+
+def pin(host: str, port: int) -> list[str] | None:
+    """The checked addresses to dial for `host` when the guard is on, else None."""
+    return resolve_public_all(host, port) if _enabled else None
+
+
+def connect(addrs: list[str], port: int, timeout=None, source_address=None) -> socket.socket:
+    """Like socket.create_connection over a host's checked addresses: try each
+    in order (a host may publish IPv6 first on a network without IPv6)."""
+    err: OSError | None = None
+    for addr in addrs:
+        try:
+            return socket.create_connection((addr, port), timeout, source_address)
+        except OSError as e:
+            err = e
+    raise err or OSError(f"no address to connect to on port {port}")
