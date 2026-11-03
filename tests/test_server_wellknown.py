@@ -1,4 +1,4 @@
-"""End-to-end HTTP smoke: /health, /.well-known metadata, 401 with WWW-Authenticate.
+"""End-to-end HTTP smoke: /health, 401 with WWW-Authenticate, no OAuth endpoints.
 
 Uses a real uvicorn server on a private port + urllib requests. No mocks of
 the network layer.
@@ -43,7 +43,6 @@ def running_server(tmp_path):
         "MCP_HOST": "127.0.0.1",
         "MCP_PORT": str(port),
         "MCP_ALLOWED_HOSTS": "127.0.0.1,localhost",
-        "MCP_RESOURCE_URL": f"http://127.0.0.1:{port}",
     }
     proc = subprocess.Popen(
         [sys.executable, "-m", "cpanel_mail_mcp"],
@@ -72,26 +71,9 @@ def test_health(running_server):
     assert body == b"ok"
 
 
-def test_protected_resource_metadata(running_server):
-    port = running_server
-    body = urllib.request.urlopen(
-        f"http://127.0.0.1:{port}/.well-known/oauth-protected-resource"
-    ).read()
-    doc = json.loads(body)
-    assert doc["resource"] == f"http://127.0.0.1:{port}"
-    assert doc["bearer_methods_supported"] == ["header"]
 
 
-def test_path_suffixed_metadata_also_works(running_server):
-    port = running_server
-    body = urllib.request.urlopen(
-        f"http://127.0.0.1:{port}/.well-known/oauth-protected-resource/mcp"
-    ).read()
-    doc = json.loads(body)
-    assert "resource" in doc
-
-
-def test_mcp_without_auth_returns_401_with_resource_metadata(running_server):
+def test_mcp_without_auth_returns_401(running_server):
     port = running_server
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}/mcp", method="POST",
@@ -104,7 +86,17 @@ def test_mcp_without_auth_returns_401_with_resource_metadata(running_server):
         pytest.fail("expected 401")
     except urllib.error.HTTPError as e:
         assert e.code == 401
-        wa = e.headers.get("www-authenticate", "")
-        assert "Bearer" in wa
-        assert "resource_metadata=" in wa
-        assert "/.well-known/oauth-protected-resource" in wa
+        assert e.headers.get("www-authenticate", "") == 'Bearer realm="mcp"'
+
+
+def _status(url: str, method: str = "GET") -> int:
+    try:
+        return urllib.request.urlopen(urllib.request.Request(url, method=method, data=b"" if method == "POST" else None)).status
+    except urllib.error.HTTPError as e:
+        return e.code
+
+
+def test_oauth_endpoints_are_gone(running_server):
+    port = running_server
+    assert _status(f"http://127.0.0.1:{port}/.well-known/oauth-protected-resource") == 401
+    assert _status(f"http://127.0.0.1:{port}/register", "POST") == 401

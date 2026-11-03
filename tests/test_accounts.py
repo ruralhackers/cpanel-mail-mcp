@@ -1,4 +1,4 @@
-"""Account loading from env vars + JSON files + sso_emails handling."""
+"""Account loading from env vars + JSON files ."""
 import json
 import os
 from pathlib import Path
@@ -57,23 +57,6 @@ def test_email_accounts_file(monkeypatch, tmp_path):
     accts = accounts.load_accounts()
     assert list(accts) == ["x"]
 
-
-def test_sso_emails_normalization():
-    a = accounts._from_dict({
-        "user": "u@v.com", "password": "p",
-        "smtp_host": "s", "imap_host": "i",
-        "sso_emails": ["A@B.com", "  c@d.com  ", ""],
-    })
-    assert a.sso_emails == ("a@b.com", "c@d.com")
-
-
-def test_sso_email_singular_accepted():
-    a = accounts._from_dict({
-        "user": "u@v.com", "password": "p",
-        "smtp_host": "s", "imap_host": "i",
-        "sso_email": "one@x.com",
-    })
-    assert a.sso_emails == ("one@x.com",)
 
 
 def test_duplicate_account_name_rejected(monkeypatch):

@@ -4,8 +4,7 @@ Each mailbox action is its own MCP tool (not a single dispatcher). This lets
 `tools/list` show the full capability surface and lets clients render the
 right shape of input/output per tool.
 
-Transports: stdio (default) or Streamable HTTP with bearer + optional
-Cloudflare Access OIDC (see `serve()`).
+Transports: stdio (default) or Streamable HTTP with bearer tokens (see `serve()`).
 
 Tools are async and run blocking IMAP/SMTP work in worker threads, so one
 slow mailbox never stalls other users. In HTTP mode the caller's account is
@@ -32,7 +31,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import BeforeValidator, Field
 
-from . import cf_access, idempotency, imap_ops, oauth_proxy, passthrough, rate_limit, smtp_ops
+from . import idempotency, imap_ops, rate_limit, smtp_ops
 from . import users as users_mod
 from .accounts import Account, get_account, load_accounts
 from .errors import SendGateBlocked, UnknownAccount
@@ -791,32 +790,11 @@ async def _send_text(send, status: int, text: str) -> None:
     await send({"type": "http.response.body", "body": text.encode()})
 
 
-_www_authenticate_header: bytes = b'Bearer realm="mcp"'
-
-
-def _set_www_authenticate(resource_url: str) -> None:
-    global _www_authenticate_header
-    if resource_url:
-        _www_authenticate_header = (
-            f'Bearer realm="mcp", '
-            f'resource_metadata="{resource_url}/.well-known/oauth-protected-resource"'
-        ).encode()
+_WWW_AUTHENTICATE = b'Bearer realm="mcp"'
 
 
 async def _send_401(send, detail: str = "unauthorized") -> None:
-    await _send_json(send, 401, {"error": detail}, [(b"www-authenticate", _www_authenticate_header)])
-
-
-async def _send_403(send, detail: str) -> None:
-    await _send_json(send, 403, {"error": detail})
-
-
-def _user_by_email(users: dict[str, Account], email: str) -> Account | None:
-    needle = email.lower()
-    for acct in users.values():
-        if needle in acct.sso_emails or acct.user.lower() == needle:
-            return acct
-    return None
+    await _send_json(send, 401, {"error": detail}, [(b"www-authenticate", _WWW_AUTHENTICATE)])
 
 
 def _user_by_token(users: dict[str, Account], token: str) -> Account | None:
@@ -830,11 +808,11 @@ def _user_by_token(users: dict[str, Account], token: str) -> Account | None:
 
 
 def _is_public_path(path: str) -> bool:
-    return path in ("/health", "/healthz") or path.startswith("/.well-known/") or path == "/register"
+    return path in ("/health", "/healthz")
 
 
 class _SessionBoundAuth:
-    """Base for the auth middlewares: after a subclass has authenticated a
+    """Base for the auth middleware: after a subclass has authenticated a
     request, `_dispatch` puts the caller's Account and identity in the ASGI
     scope state (where tools read them) and binds each MCP session to the
     identity that created it."""
@@ -880,9 +858,8 @@ class _SessionBoundAuth:
 
 
 class UnifiedAuthASGI(_SessionBoundAuth):
-    """Authenticate every HTTP request via a CF Access JWT (Cf-Access-Jwt-Assertion
-    or Bearer JWT), an opaque bearer from users.json, or a single-tenant token.
-    """
+    """Authenticate every HTTP request with an opaque bearer from users.json
+    or a single-tenant token."""
 
     def __init__(
         self,
@@ -890,14 +867,12 @@ class UnifiedAuthASGI(_SessionBoundAuth):
         *,
         users: users_mod.UsersStore | dict[str, Account] | None = None,
         single_token: str | None = None,
-        cf_verifier: cf_access.CFAccessVerifier | None = None,
     ) -> None:
         if (users is None) == (not single_token):
             raise ValueError("UnifiedAuthASGI: pick exactly one of single_token or users")
         super().__init__(app)
         self._users_src = users
         self._expected = f"Bearer {single_token}".encode() if single_token else None
-        self._cf = cf_verifier
 
     def _users(self) -> dict[str, Account]:
         src = self._users_src
@@ -913,37 +888,14 @@ class UnifiedAuthASGI(_SessionBoundAuth):
             await self.app(scope, receive, send)
             return
 
-        cf_jwt_header = b""
         auth = b""
         for k, v in scope.get("headers", []):
-            if k == b"cf-access-jwt-assertion":
-                cf_jwt_header = v
-            elif k == b"authorization":
+            if k == b"authorization":
                 auth = v
-
-        users = self._users()
-
-        if self._cf and cf_jwt_header:
-            try:
-                claims = self._cf.verify(cf_jwt_header.decode(errors="replace").strip())
-            except cf_access.CFAccessInvalid as e:
-                await _send_401(send, f"cf-access-jwt-invalid: {e}")
-                return
-            return await self._dispatch_with_claims(scope, receive, send, users, claims)
-
-        if self._cf and auth.startswith(b"Bearer "):
-            token = auth[7:].decode("ascii", errors="replace").strip()
-            if token.count(".") == 2:
-                try:
-                    claims = self._cf.verify(token)
-                except cf_access.CFAccessInvalid:
-                    claims = None
-                if claims is not None:
-                    return await self._dispatch_with_claims(scope, receive, send, users, claims)
 
         if self._users_src is not None and auth.startswith(b"Bearer "):
             token = auth[7:].decode("ascii", errors="replace").strip()
-            acct = _user_by_token(users, token) if token else None
+            acct = _user_by_token(self._users(), token) if token else None
             if acct is not None:
                 return await self._dispatch(scope, receive, send, acct, f"user:{acct.user.lower()}")
 
@@ -952,118 +904,17 @@ class UnifiedAuthASGI(_SessionBoundAuth):
 
         await _send_401(send)
 
-    async def _dispatch_with_claims(self, scope, receive, send, users, claims: dict) -> None:
-        email = cf_access.extract_email(claims)
-        if not email:
-            await _send_403(send, "cf-access-jwt-no-email")
-            return
-        acct = _user_by_email(users, email) if users else None
-        if acct is None:
-            await _send_403(send, f"unknown-user:{email}")
-            return
-        await self._dispatch(scope, receive, send, acct, f"user:{acct.user.lower()}")
 
+class HealthASGI:
+    """Answers `/health` and `/healthz` without auth (reverse-proxy probes)."""
 
-class CredentialsAuthASGI(_SessionBoundAuth):
-    """`MCP_AUTH_MODE=credentials`: every request carries the mailbox login
-    (X-Email-User + X-Email-Password, or Basic auth). See `passthrough`."""
-
-    def __init__(self, app, *, verifier: passthrough.CredentialVerifier,
-                 api_key: str | None = None) -> None:
-        super().__init__(app)
-        self.verifier = verifier
-        self._api_key = api_key.encode() if api_key else None
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or _is_public_path(scope.get("path", "")):
-            await self.app(scope, receive, send)
-            return
-        headers = scope.get("headers", [])
-        challenge = [(b"www-authenticate", b'Basic realm="cpanel-mail-mcp"')]
-        if self._api_key is not None:
-            given = next((v for k, v in headers if k == b"x-api-key"), b"")
-            if not hmac.compare_digest(given, self._api_key):
-                await _send_json(send, 401, {"error": "invalid_api_key"}, challenge)
-                return
-        creds = passthrough.extract_credentials(headers)
-        if creds is None:
-            await _send_json(send, 401, {
-                "error": "missing_credentials",
-                "hint": "send X-Email-User and X-Email-Password headers (or Basic auth)",
-            }, challenge)
-            return
-        try:
-            acct = await anyio.to_thread.run_sync(self.verifier.check, *creds)
-        except passthrough.InvalidCredentials:
-            await _send_json(send, 401, {"error": "invalid_credentials"}, challenge)
-            return
-        except passthrough.DomainNotAllowed as e:
-            await _send_json(send, 403, {"error": "domain_not_allowed", "domain": str(e)})
-            return
-        except passthrough.Throttled as e:
-            await _send_json(send, 429, {"error": "too_many_failed_logins", "retry_after": e.retry_after},
-                             [(b"retry-after", str(e.retry_after).encode())])
-            return
-        except passthrough.UpstreamUnavailable as e:
-            log.error("mail server unreachable while verifying %s: %s", creds[0], e)
-            await _send_json(send, 503, {"error": "mail_server_unreachable"})
-            return
-        await self._dispatch(scope, receive, send, acct, f"user:{acct.user}")
-
-
-class WellKnownASGI:
-    def __init__(
-        self,
-        app,
-        *,
-        resource_url: str,
-        authorization_servers: list[str],
-        proxy: oauth_proxy.OAuthProxy | None = None,
-    ) -> None:
+    def __init__(self, app) -> None:
         self.app = app
-        self.resource_url = resource_url
-        self.proxy = proxy
-        as_list = [resource_url] if proxy else authorization_servers
-        self._prm_body = json.dumps({
-            "resource": resource_url,
-            "authorization_servers": as_list,
-            "bearer_methods_supported": ["header"],
-            "resource_documentation": "https://github.com/rosauceda/cpanel-mail-mcp",
-        }).encode()
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-        path = scope.get("path", "")
-        method = scope.get("method", "GET")
-        if path in ("/health", "/healthz"):
+        if scope["type"] == "http" and scope.get("path", "") in ("/health", "/healthz"):
             await _send_text(send, 200, "ok")
             return
-        if path == "/.well-known/oauth-protected-resource" or path.startswith(
-            "/.well-known/oauth-protected-resource/"
-        ):
-            await _send_json(send, 200, self._prm_body)
-            return
-        if self.proxy is not None:
-            if path in (
-                "/.well-known/oauth-authorization-server",
-                "/.well-known/openid-configuration",
-            ) or path.startswith("/.well-known/oauth-authorization-server/"):
-                try:
-                    body = await anyio.to_thread.run_sync(self.proxy.composed_metadata)
-                except Exception as e:
-                    await _send_json(send, 502, {"error": "upstream_unreachable", "detail": str(e)})
-                    return
-                await _send_json(send, 200, body)
-                return
-            if path == "/register" and method == "POST":
-                try:
-                    await self.proxy.handle_register(scope, receive, send)
-                except Exception as e:
-                    log.exception("DCR handler crashed: %s", e)
-                    await _send_json(send, 500, {"error": "dcr_failed"})
-                return
         await self.app(scope, receive, send)
 
 
@@ -1072,32 +923,16 @@ def _bool_env(name: str) -> bool:
 
 
 def create_http_app(transport: str = "streamable-http"):
-    """Build the HTTP ASGI app (auth + well-known) from environment variables."""
+    """Build the HTTP ASGI app (auth + health) from environment variables."""
     attach_dir = os.environ.get("MCP_ATTACHMENT_DIR", "").strip() or None
     # Remote callers must never read the server's own files (users.json holds
     # every mailbox password): `path` attachments only under MCP_ATTACHMENT_DIR.
     smtp_ops.configure_path_attachments(bool(attach_dir), attach_dir)
 
-    auth_mode = os.environ.get("MCP_AUTH_MODE", "").strip().lower()
-    if auth_mode not in ("", "tokens", "credentials"):
-        raise SystemExit(f"unknown MCP_AUTH_MODE={auth_mode!r}. Use tokens|credentials.")
     allow_no_auth = _bool_env("MCP_ALLOW_NO_AUTH")
-
     app = mcp.sse_app() if transport == "sse" else mcp.streamable_http_app()
 
-    if auth_mode == "credentials":
-        template = passthrough.template_from_env()
-        app = CredentialsAuthASGI(
-            app,
-            verifier=passthrough.CredentialVerifier(template),
-            api_key=os.environ.get("MCP_API_KEY", "").strip() or None,
-        )
-        log.info(
-            "credentials mode: callers log in with their own mailbox on %s (domains: %s, api key: %s)",
-            template.imap_host, ", ".join(template.allowed_domains) or "any",
-            "required" if os.environ.get("MCP_API_KEY", "").strip() else "off",
-        )
-    elif users_mod.is_multi_user():
+    if users_mod.is_multi_user():
         users_file = users_mod.users_path()
         users_mod.load_users(users_file)  # fail fast on a malformed file
         store = users_mod.UsersStore(users_file)
@@ -1106,37 +941,22 @@ def create_http_app(transport: str = "streamable-http"):
                 "%s has no users yet — add one with `cpanel-mail-mcp admin add-user`; "
                 "changes are picked up without a restart", users_file,
             )
-        cf_verifier = cf_access.from_env()
-        if cf_verifier:
-            log.info("CF Access OIDC ENABLED: team=%s aud=%s…",
-                     cf_verifier.team_domain, cf_verifier.audience[:10])
-        app = UnifiedAuthASGI(app, users=store, cf_verifier=cf_verifier)
+        app = UnifiedAuthASGI(app, users=store)
         log.info("multi-user mode: %d user(s) loaded from %s", len(store.get()), store.path)
     else:
         single_token = os.environ.get("MCP_AUTH_TOKEN", "").strip()
         if single_token:
-            app = UnifiedAuthASGI(app, single_token=single_token, cf_verifier=cf_access.from_env())
+            app = UnifiedAuthASGI(app, single_token=single_token)
             log.info("single-tenant mode: bearer auth ENABLED")
         elif allow_no_auth:
             log.warning("bearer auth DISABLED via MCP_ALLOW_NO_AUTH")
         else:
             raise SystemExit(
-                "HTTP mode needs auth. Set MCP_AUTH_MODE=credentials (callers send their "
-                "mailbox login), EMAIL_USERS_FILE for multi-user tokens, MCP_AUTH_TOKEN for "
-                "single-tenant, or MCP_ALLOW_NO_AUTH=1 for dev."
+                "HTTP mode needs auth. Set EMAIL_USERS_FILE for multi-user tokens, "
+                "MCP_AUTH_TOKEN for single-tenant, or MCP_ALLOW_NO_AUTH=1 for dev."
             )
     log.info("path attachments: %s", f"only under {attach_dir}" if attach_dir else "disabled")
-
-    resource_url = os.environ.get("MCP_RESOURCE_URL", "").strip().rstrip("/")
-    as_urls = [u.strip() for u in os.environ.get("MCP_OAUTH_AUTHORIZATION_SERVERS", "").split(",") if u.strip()]
-    proxy = oauth_proxy.from_env(resource_url) if resource_url else None
-    if proxy is not None:
-        log.info("OAuth DCR proxy ENABLED upstream=%s", proxy.upstream_issuer)
-    if resource_url:
-        _set_www_authenticate(resource_url)
-        return WellKnownASGI(app, resource_url=resource_url,
-                             authorization_servers=as_urls, proxy=proxy)
-    return WellKnownASGI(app, resource_url="", authorization_servers=[])
+    return HealthASGI(app)
 
 
 def serve() -> None:

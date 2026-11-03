@@ -14,7 +14,6 @@ def _acct(**over):
         "imap_host": "i.ex.com", "imap_port": 993,
         "sent_folder": "Sent", "drafts_folder": "Drafts",
         "save_to_sent": True, "from_name": None,
-        "sso_emails": (),
     }
     d.update(over)
     return Account(**d)

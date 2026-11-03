@@ -72,27 +72,11 @@ def test_remove_user(users_file):
     assert [e["account"]["user"] for e in data] == ["b@x.com"]
 
 
-def test_add_sso_email(users_file):
-    _run(["add-user", "--email", "a@x.com", "--password", "p", "--host", "h"])
-    _run(["add-sso-email", "--email", "a@x.com", "--sso-email", "b@gmail.com",
-          "--sso-email", "c@gmail.com"])
-    data = json.loads(users_file.read_text())[0]["account"]
-    assert data["sso_emails"] == ["b@gmail.com", "c@gmail.com"]
-
-
-def test_remove_sso_email(users_file):
-    _run(["add-user", "--email", "a@x.com", "--password", "p", "--host", "h",
-          "--sso-email", "b@gmail.com", "--sso-email", "c@gmail.com"])
-    _run(["remove-sso-email", "--email", "a@x.com", "--sso-email", "b@gmail.com"])
-    data = json.loads(users_file.read_text())[0]["account"]
-    assert data["sso_emails"] == ["c@gmail.com"]
 
 
 def test_load_users_matches_json(users_file):
-    _run(["add-user", "--email", "a@x.com", "--password", "p", "--host", "h",
-          "--sso-email", "sso@a.com"])
+    _run(["add-user", "--email", "a@x.com", "--password", "p", "--host", "h"])
     loaded = users_mod.load_users()
     assert len(loaded) == 1
     acct = next(iter(loaded.values()))
     assert acct.user == "a@x.com"
-    assert acct.sso_emails == ("sso@a.com",)

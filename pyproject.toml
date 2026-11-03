@@ -1,7 +1,7 @@
 [project]
 name = "cpanel-mail-mcp"
 version = "0.7.1"
-description = "MCP server for IMAP/SMTP email — 22 typed tools (read/send/reply/forward/move/flag/folder mgmt), multi-user, CF Access OIDC, DCR proxy, rate limits, send idempotency, ICS invites."
+description = "MCP server for IMAP/SMTP email — 22 typed tools (read/send/reply/forward/move/flag/folder mgmt), multi-user, rate limits, send idempotency, ICS invites."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -21,7 +21,6 @@ classifiers = [
 dependencies = [
     "mcp[cli]>=1.28,<2",
     "python-dotenv>=1.0.0",
-    "pyjwt[crypto]>=2.8.0",
 ]
 
 [project.urls]
