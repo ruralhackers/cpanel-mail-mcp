@@ -165,13 +165,37 @@ class UsersStore:
 _upsert_lock = threading.Lock()
 
 
+class HostMismatch(Exception):
+    """The mailbox is already registered against a different IMAP host."""
+
+
+def registered_host(email: str) -> str | None:
+    """IMAP host of the existing entry for `email` (case-insensitive), if any."""
+    needle = email.lower()
+    for u in load_users_raw():
+        acct = u.get("account", {})
+        if acct.get("user", "").lower() == needle:
+            return acct.get("imap_host") or acct.get("host")
+    return None
+
+
 def upsert_user(entry: dict) -> bool:
-    """Add `entry`, replacing any entry for the same mailbox (case-insensitive).
-    Returns True when an existing entry was replaced (its token is revoked)."""
-    user = entry["account"]["user"].lower()
+    """Add `entry`, replacing any entry for the same mailbox (case-insensitive)
+    on the same IMAP host. Returns True when an entry was replaced (its token
+    is revoked). Raises HostMismatch if the mailbox is registered on another
+    host: proving a login on a server you control must not let you take over
+    someone else's registration."""
+    acct = entry["account"]
+    user, host = acct["user"].lower(), (acct.get("imap_host") or "").lower()
     with _upsert_lock:
         all_users = load_users_raw()
-        kept = [u for u in all_users if u.get("account", {}).get("user", "").lower() != user]
+        kept = []
+        for u in all_users:
+            a = u.get("account", {})
+            if a.get("user", "").lower() != user:
+                kept.append(u)
+            elif (a.get("imap_host") or a.get("host") or "").lower() != host:
+                raise HostMismatch(user)
         save_users(kept + [entry])
         return len(kept) != len(all_users)
 

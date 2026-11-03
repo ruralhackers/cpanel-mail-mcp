@@ -12,6 +12,8 @@ import email
 import imaplib
 import os
 import re
+import socket
+import ssl
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -19,7 +21,7 @@ from email.header import decode_header, make_header
 from email.utils import parsedate_to_datetime
 from typing import Iterator
 
-from . import utf7
+from . import netguard, utf7
 from .accounts import Account
 from .errors import (
     FolderNotFound,
@@ -59,10 +61,38 @@ def _timeout() -> float:
         return 30.0
 
 
-def _connect(a: Account) -> imaplib.IMAP4_SSL:
-    m = imaplib.IMAP4_SSL(a.imap_host, a.imap_port, timeout=_timeout())
-    try:
+class _PinnedIMAP4_SSL(imaplib.IMAP4_SSL):
+    """IMAP4_SSL that dials an already-checked address (see `netguard`) while
+    TLS still verifies the certificate against the host name."""
+
+    def __init__(self, ip: str, *args, **kwargs) -> None:
+        self._pinned_ip = ip
+        super().__init__(*args, **kwargs)
+
+    def _create_socket(self, timeout):
+        sock = socket.create_connection((self._pinned_ip, self.port), timeout)
+        return self.ssl_context.wrap_socket(sock, server_hostname=self.host)
+
+
+def _login(m: imaplib.IMAP4, a: Account) -> None:
+    """LOGIN for ASCII credentials; AUTHENTICATE PLAIN (UTF-8, RFC 4616) otherwise,
+    since imaplib encodes LOGIN arguments as ASCII."""
+    if a.user.isascii() and a.password.isascii():
         m.login(a.user, a.password)
+    else:
+        blob = b"\0" + a.user.encode() + b"\0" + a.password.encode()
+        m.authenticate("PLAIN", lambda _challenge: blob)
+
+
+def _connect(a: Account) -> imaplib.IMAP4_SSL:
+    ctx = ssl.create_default_context()
+    ip = netguard.pin(a.imap_host, a.imap_port)
+    if ip is None:
+        m = imaplib.IMAP4_SSL(a.imap_host, a.imap_port, ssl_context=ctx, timeout=_timeout())
+    else:
+        m = _PinnedIMAP4_SSL(ip, a.imap_host, a.imap_port, ssl_context=ctx, timeout=_timeout())
+    try:
+        _login(m, a)
     except Exception:
         try:
             m.shutdown()

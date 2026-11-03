@@ -12,17 +12,15 @@ from __future__ import annotations
 
 import hmac
 import html
-import ipaddress
 import logging
 import re
-import socket
 from typing import Callable
 from urllib.parse import parse_qs
 
 import anyio
 from cryptography.fernet import Fernet
 
-from . import mailcheck, users as users_mod
+from . import mailcheck, netguard, users as users_mod
 from .accounts import _from_dict
 from .mailcheck import LoginThrottle, MailboxRejected, MailServerUnreachable, Throttled
 
@@ -129,21 +127,14 @@ def _success_html(key: str, public_url: str, email: str, replaced: bool) -> byte
     return _page("Correo conectado", body)
 
 
-def _is_internal(addr: str) -> bool:
-    ip = ipaddress.ip_address(addr.split("%", 1)[0])
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
-        ip = ip.ipv4_mapped
-    return (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
-            or ip.is_multicast or ip.is_unspecified)
-
-
 def _check_public(host: str, port: int) -> None:
+    """Friendly early rejection; the connection itself is pinned by netguard."""
     try:
-        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        netguard.resolve_public(host, port)
+    except netguard.PrivateHost:
+        raise _Bad(400, f"El servidor {host} no es una dirección pública de Internet.") from None
     except OSError:
         raise _Bad(400, f"No se encuentra el servidor {host}. Revisa el nombre.") from None
-    if not infos or any(_is_internal(i[4][0]) for i in infos):
-        raise _Bad(400, f"El servidor {host} no es una dirección pública de Internet.")
 
 
 def _port(raw: str, field: str) -> int:
@@ -177,18 +168,30 @@ def _parse(fields: dict[str, str]) -> dict:
     }
 
 
+def _norm_code(code: str) -> bytes:
+    return code.strip().casefold().encode()
+
+
+def _throttled(e: Throttled) -> _Bad:
+    msg = ("Demasiados intentos fallidos con este correo. Prueba más tarde." if e.scope == "user"
+           else "Hay muchos intentos fallidos en este momento. Espera unos minutos y vuelve a probar.")
+    return _Bad(429, msg, [(b"retry-after", str(e.retry_after).encode())])
+
+
 class SignupASGI:
     def __init__(self, app, *, code: str, fernet: Fernet, public_url: str,
                  verify: Callable = mailcheck.verify_mailbox,
                  throttle: LoginThrottle | None = None,
                  code_throttle: LoginThrottle | None = None) -> None:
         self.app = app
-        self._code = code.encode()
+        self._code = _norm_code(code)
         self._fernet = fernet
         self._public_url = public_url.rstrip("/")
         self._verify = verify
-        self._throttle = throttle or LoginThrottle()  # per mailbox + global
-        self._code_throttle = code_throttle or LoginThrottle(max_per_user=10)  # per client IP
+        # per mailbox + overall; sized for a whole class signing up at once
+        self._throttle = throttle or LoginThrottle(max_per_user=5, max_global=300)
+        # wrong course codes per client IP (a classroom may share one NAT IP)
+        self._code_throttle = code_throttle or LoginThrottle(max_per_user=20, max_global=1000)
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http" or scope.get("path") not in PATHS:
@@ -244,18 +247,21 @@ class SignupASGI:
         try:
             self._code_throttle.check(ip)
         except Throttled as e:
-            raise _Bad(429, "Demasiados intentos. Prueba más tarde.",
-                       [(b"retry-after", str(e.retry_after).encode())]) from None
-        if not hmac.compare_digest(fields.get("codigo", "").strip().encode(), self._code):
+            raise _throttled(e) from None
+        if not hmac.compare_digest(_norm_code(fields.get("codigo", "")), self._code):
             self._code_throttle.failure(ip)
             raise _Bad(403, "El código del curso no es correcto.")
+        self._code_throttle.success(ip)
 
         f = _parse(fields)
         try:
             self._throttle.check(f["email"])
         except Throttled as e:
-            raise _Bad(429, "Demasiados intentos fallidos con este correo. Prueba más tarde.",
-                       [(b"retry-after", str(e.retry_after).encode())]) from None
+            raise _throttled(e) from None
+        existing = await anyio.to_thread.run_sync(users_mod.registered_host, f["email"])
+        if existing is not None and existing.lower() != f["imap_host"].lower():
+            raise _Bad(409, "Este correo ya está dado de alta con otro servidor IMAP. Para "
+                            "cambiarlo, pide al responsable del curso que borre el alta anterior.")
 
         check_smtp = bool(f["smtp_host"])
         smtp_host = f["smtp_host"] or f["imap_host"]
@@ -281,9 +287,14 @@ class SignupASGI:
             raise _Bad(400, f"El servidor {name} ha rechazado el usuario o la contraseña. Si tu "
                             "proveedor lo permite, usa una contraseña de aplicación.") from None
         except MailServerUnreachable as e:
+            self._throttle.failure(f["email"])
             host, port = ((f["imap_host"], f["imap_port"]) if e.protocol == "imap"
                           else (smtp_host, f["smtp_port"]))
             log.info("alta sin conexión: %s (%s %s:%s)", f["email"], e.protocol, host, port)
+            if e.cert_error:
+                raise _Bad(502, f"El certificado de seguridad de {host} no corresponde a ese nombre. "
+                                "Usa el nombre de servidor que indica tu proveedor (a veces es el "
+                                "del hosting, no mail.tudominio).") from None
             raise _Bad(502, f"No se ha podido conectar con {host}:{port}.") from None
 
         self._throttle.success(f["email"])
@@ -292,7 +303,10 @@ class SignupASGI:
         if info.trash_folder:
             account["trash_folder"] = info.trash_folder
         key = users_mod.new_token()
-        replaced = await anyio.to_thread.run_sync(
-            users_mod.upsert_user, users_mod.make_entry(key, account, self._fernet))
+        try:
+            replaced = await anyio.to_thread.run_sync(
+                users_mod.upsert_user, users_mod.make_entry(key, account, self._fernet))
+        except users_mod.HostMismatch:  # registered on another host meanwhile
+            raise _Bad(409, "Este correo ya está dado de alta con otro servidor IMAP.") from None
         log.info("alta ok: %s (%s)", f["email"], "sustituida" if replaced else "nueva")
         return 200, _success_html(key, self._public_url, f["email"], replaced)

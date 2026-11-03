@@ -10,12 +10,20 @@
   Re-registering the same mailbox replaces it and revokes the old key. Failed
   attempts are throttled per mailbox, overall, and wrong codes per client IP.
 - Docker image and compose for multi-user mode with a `/data` volume.
+- **Network guard** in multi-user mode: IMAP/SMTP hosts must resolve to public
+  addresses and the checked address is the one dialed (no DNS rebinding);
+  opt out with `MCP_ALLOW_PRIVATE_MAIL_HOSTS=1`.
 
 ### Changed
 - **users.json at rest**: mailbox passwords are Fernet-encrypted with
   `MCP_USERS_KEY` (required) and tokens are stored only as SHA-256
   (`token_sha256`). Plaintext entries are rejected: re-add those users.
 - `EMAIL_USERS_FILE` alone enables multi-user mode, even before the file exists.
+
+### Fixed
+- Passwords with non-ASCII characters (`contraseña`) now log in: AUTHENTICATE /
+  AUTH PLAIN in UTF-8 instead of imaplib's / smtplib's ASCII-only LOGIN.
+- IMAP over TLS now verifies the server certificate (it used CERT_NONE).
 
 ### Removed
 - Cloudflare Access OIDC, the OAuth DCR proxy and `/.well-known` metadata,

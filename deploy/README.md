@@ -130,6 +130,7 @@ claude mcp list | grep cpanel     # should show ✔ Connected
 | `EMAIL_USERS_FILE`             | —              | path to users.json → **multi-user mode** (the file may not exist yet) |
 | `MCP_USERS_KEY`                | —              | **required in multi-user mode**: Fernet key that encrypts mailbox passwords in users.json |
 | `MCP_SIGNUP_CODE`              | —              | course code; enables the `/alta` signup page   |
+| `MCP_ALLOW_PRIVATE_MAIL_HOSTS` | —              | multi-user mode refuses mail hosts that resolve to private/loopback/CGNAT addresses (and dials the checked IP); set truthy to allow them, e.g. a mail server on your LAN |
 | `MCP_PUBLIC_URL`               | —              | public base URL shown on the signup page (required with `MCP_SIGNUP_CODE`) |
 | `MCP_AUTH_TOKEN`               | —              | single-tenant bearer (ignored if users.json exists) |
 | `MCP_ALLOW_NO_AUTH`            | —              | set truthy to disable auth (dev only)          |

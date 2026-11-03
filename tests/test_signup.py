@@ -37,7 +37,7 @@ def env(tmp_path, monkeypatch):
         addr = resolved.get(host, resolved["addr"])
         fam = socket.AF_INET6 if ":" in addr else socket.AF_INET
         return [(fam, socket.SOCK_STREAM, 6, "", (addr, port))]
-    monkeypatch.setattr(signup.socket, "getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
 
     app = signup.SignupASGI(_inner, code=CODE, fernet=vault.load_key(),
                             public_url="https://imap-mcp.example", verify=verify,
@@ -184,3 +184,69 @@ def test_body_too_large_413(env):
     r = _req(env.app, "POST", content=b"a=" + b"x" * 9000,
              headers={"content-type": "application/x-www-form-urlencoded"})
     assert r.status_code == 413
+
+
+def test_resignup_with_other_host_is_refused(env):
+    k1 = _key(_req(env.app, "POST", data=_form()).text)
+    r = _req(env.app, "POST", data=_form(imap_host="evil.example", password="whatever"))
+    assert r.status_code == 409
+    assert len(env.calls) == 1  # the second attempt never reached verify
+    assert list(users_mod.load_users()) == [vault.hash_token(k1)]
+
+
+def test_resignup_same_host_other_case_allowed(env):
+    _req(env.app, "POST", data=_form())
+    assert _req(env.app, "POST", data=_form(imap_host="MAIL.EX.COM")).status_code == 200
+
+
+def test_rejects_cgnat(env):
+    env.resolved["addr"] = "100.64.1.1"
+    assert _req(env.app, "POST", data=_form()).status_code == 400 and env.calls == []
+
+
+def test_code_is_case_and_space_insensitive(env):
+    assert _req(env.app, "POST", data=_form(codigo="  CURSO-2026 ")).status_code == 200
+
+
+def test_correct_code_clears_ip_failures(env):
+    app = signup.SignupASGI(_inner, code=CODE, fernet=vault.load_key(), public_url="https://x",
+                            verify=lambda a, check_smtp: MailboxInfo("S", "D", None, True),
+                            code_throttle=LoginThrottle(max_per_user=3))
+    h = {"x-real-ip": "1.2.3.4"}
+    for _ in range(2):
+        _req(app, "POST", data=_form(codigo="typo"), headers=h)
+    assert _req(app, "POST", data=_form(), headers=h).status_code == 200
+    for _ in range(2):
+        _req(app, "POST", data=_form(codigo="typo"), headers=h)
+    assert _req(app, "POST", data=_form(email="b@ex.com"), headers=h).status_code == 200
+
+
+def test_global_cap_has_its_own_message(env):
+    env.state["fail"] = MailboxRejected("imap")
+    env.app._throttle = LoginThrottle(max_per_user=5, max_global=3)
+    for i in range(3):
+        _req(env.app, "POST", data=_form(email=f"u{i}@ex.com"))
+    r = _req(env.app, "POST", data=_form(email="fresh@ex.com"))
+    assert r.status_code == 429
+    assert "con este correo" not in r.text and "muchos intentos" in r.text.lower()
+
+
+def test_default_limits_fit_a_class():
+    app = signup.SignupASGI(_inner, code=CODE, fernet=vault.load_key(), public_url="https://x")
+    assert app._throttle.max_global >= 300
+    assert app._code_throttle.max_user >= 20
+
+
+def test_unreachable_counts_as_failure(env):
+    from cpanel_mail_mcp.mailcheck import MailServerUnreachable
+    env.state["fail"] = MailServerUnreachable("imap")
+    for _ in range(5):
+        assert _req(env.app, "POST", data=_form()).status_code == 502
+    assert _req(env.app, "POST", data=_form()).status_code == 429
+
+
+def test_certificate_error_message(env):
+    from cpanel_mail_mcp.mailcheck import MailServerUnreachable
+    env.state["fail"] = MailServerUnreachable("imap", cert_error=True)
+    r = _req(env.app, "POST", data=_form())
+    assert r.status_code == 502 and "certificado" in r.text

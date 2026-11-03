@@ -117,3 +117,15 @@ def test_is_multi_user_without_file(tmp_path, monkeypatch):
     monkeypatch.setenv("EMAIL_USERS_FILE", str(tmp_path / "missing.json"))
     assert users_mod.is_multi_user()
     assert users_mod.load_users() == {}
+
+
+def test_upsert_refuses_other_host(users_file):
+    f = vault.load_key()
+    acct = {"user": "a@x.com", "password": "p", "imap_host": "mail.x.com", "smtp_host": "mail.x.com"}
+    users_mod.upsert_user(users_mod.make_entry("t1-xxxxxxxxxxxxxxxxxxx", acct, f))
+    with pytest.raises(users_mod.HostMismatch):
+        users_mod.upsert_user(users_mod.make_entry("t2-xxxxxxxxxxxxxxxxxxx",
+                                                   {**acct, "imap_host": "evil.example"}, f))
+    assert list(users_mod.load_users()) == [vault.hash_token("t1-xxxxxxxxxxxxxxxxxxx")]
+    assert users_mod.registered_host("A@X.com") == "mail.x.com"
+    assert users_mod.registered_host("nobody@x.com") is None

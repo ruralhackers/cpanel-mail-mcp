@@ -143,3 +143,13 @@ def test_throttle_success_clears_user():
     t.success("a@x")
     t.failure("a@x")
     t.check("a@x")
+
+
+def test_certificate_error_is_flagged(monkeypatch):
+    import ssl
+    def bad_cert(a):
+        raise ssl.SSLCertVerificationError("hostname mismatch")
+    monkeypatch.setattr(imap_ops, "_connect", bad_cert)
+    with pytest.raises(MailServerUnreachable) as e:
+        verify_mailbox(_acct(), check_smtp=False)
+    assert e.value.cert_error is True

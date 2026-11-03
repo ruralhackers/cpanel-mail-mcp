@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import imaplib
 import smtplib
+import ssl
 import threading
 import time
 from collections import deque
@@ -37,15 +38,17 @@ class MailboxRejected(Exception):
 
 
 class MailServerUnreachable(Exception):
-    def __init__(self, protocol: Protocol, detail: str = "") -> None:
+    def __init__(self, protocol: Protocol, detail: str = "", *, cert_error: bool = False) -> None:
         super().__init__(f"{protocol} server unreachable" + (f": {detail}" if detail else ""))
         self.protocol = protocol
+        self.cert_error = cert_error  # TLS certificate didn't verify for this host name
 
 
 class Throttled(Exception):
-    def __init__(self, retry_after: int) -> None:
+    def __init__(self, retry_after: int, scope: Literal["user", "global"] = "user") -> None:
         super().__init__(f"too many failed attempts; retry in {retry_after}s")
         self.retry_after = retry_after
+        self.scope = scope
 
 
 @dataclass(frozen=True)
@@ -73,6 +76,8 @@ def verify_mailbox(acct: Account, *, check_smtp: bool) -> MailboxInfo:
         m = imap_ops._connect(acct)
     except imaplib.IMAP4.error as e:
         raise MailboxRejected("imap", str(e)) from e
+    except ssl.SSLCertVerificationError as e:
+        raise MailServerUnreachable("imap", str(e), cert_error=True) from e
     except OSError as e:
         raise MailServerUnreachable("imap", str(e)) from e
     try:
@@ -88,6 +93,8 @@ def verify_mailbox(acct: Account, *, check_smtp: bool) -> MailboxInfo:
             s = smtp_ops._connect(acct)
         except smtplib.SMTPAuthenticationError as e:
             raise MailboxRejected("smtp", str(e)) from e
+        except ssl.SSLCertVerificationError as e:
+            raise MailServerUnreachable("smtp", str(e), cert_error=True) from e
         except (OSError, smtplib.SMTPException) as e:
             raise MailServerUnreachable("smtp", str(e)) from e
         try:
@@ -134,10 +141,10 @@ class LoginThrottle:
             if uq is not None:
                 self._prune(uq, now)
                 if len(uq) >= self.max_user:
-                    raise Throttled(self._retry_after(uq, now))
+                    raise Throttled(self._retry_after(uq, now), "user")
             self._prune(self._global, now)
             if len(self._global) >= self.max_global:
-                raise Throttled(self._retry_after(self._global, now))
+                raise Throttled(self._retry_after(self._global, now), "global")
 
     def failure(self, user: str) -> None:
         now = self._clock()

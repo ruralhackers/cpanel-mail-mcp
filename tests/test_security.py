@@ -96,3 +96,13 @@ def test_users_store_keeps_last_good_map_on_wrong_key(tmp_path, monkeypatch):
     assert set(store.get()) == {vault.hash_token("tok-a-xxxxxxxxxxxxxxx")}
     with pytest.raises(ValueError):
         users_mod.load_users(p)
+
+
+@pytest.mark.parametrize("allow,expected", [("", True), ("1", False)])
+def test_multi_user_http_enables_netguard(tmp_path, monkeypatch, allow, expected):
+    from cpanel_mail_mcp import netguard, server
+    monkeypatch.setenv("EMAIL_USERS_FILE", str(tmp_path / "users.json"))
+    monkeypatch.setenv("MCP_ALLOW_PRIVATE_MAIL_HOSTS", allow)
+    monkeypatch.setattr(netguard, "_enabled", False)
+    server.create_http_app()
+    assert netguard._enabled is expected

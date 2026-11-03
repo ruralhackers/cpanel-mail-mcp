@@ -31,7 +31,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import BeforeValidator, Field
 
-from . import idempotency, imap_ops, rate_limit, smtp_ops, vault
+from . import idempotency, imap_ops, netguard, rate_limit, smtp_ops, vault
 from . import users as users_mod
 from .accounts import Account, get_account, load_accounts
 from .errors import SendGateBlocked, UnknownAccount
@@ -939,6 +939,8 @@ def create_http_app(transport: str = "streamable-http"):
                 "changes are picked up without a restart", users_file,
             )
         app = UnifiedAuthASGI(app, users=store)
+        # Users pick their own mail hosts: keep connections off our network.
+        netguard.configure(not _bool_env("MCP_ALLOW_PRIVATE_MAIL_HOSTS"))
         log.info("multi-user mode: %d user(s) loaded from %s", len(store.get()), store.path)
         signup_code = os.environ.get("MCP_SIGNUP_CODE", "").strip()
         if signup_code:
