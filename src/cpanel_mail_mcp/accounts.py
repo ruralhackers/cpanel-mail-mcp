@@ -26,10 +26,6 @@ class Account:
     drafts_folder: str
     save_to_sent: bool
     from_name: str | None
-    # SSO identities that map to this account. Used only in CF Access OIDC
-    # mode: the JWT's email claim is looked up here first, then falls back
-    # to matching against `user`. Empty tuple = only `user` matches.
-    sso_emails: tuple[str, ...] = ()
     # None = auto-detect (SPECIAL-USE \Trash, then common names) on delete.
     trash_folder: str | None = None
 
@@ -38,10 +34,6 @@ def _from_dict(d: dict) -> Account:
     if not d.get("user") or not d.get("password"):
         raise ValueError(f"account {d.get('name')!r} missing user/password")
     host = d.get("host") or ""
-    raw_sso = d.get("sso_emails") or d.get("sso_email") or ()
-    if isinstance(raw_sso, str):
-        raw_sso = (raw_sso,)
-    sso = tuple(e.strip().lower() for e in raw_sso if e and isinstance(e, str))
     return Account(
         name=str(d.get("name") or d["user"]),
         user=d["user"],
@@ -54,7 +46,6 @@ def _from_dict(d: dict) -> Account:
         drafts_folder=d.get("drafts_folder", "Drafts"),
         save_to_sent=bool(d.get("save_to_sent", True)),
         from_name=d.get("from_name"),
-        sso_emails=sso,
         trash_folder=d.get("trash_folder") or None,
     )
 

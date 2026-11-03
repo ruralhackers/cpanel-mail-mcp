@@ -1,27 +1,30 @@
-# Local run or Dokploy "Compose" deployment. On Dokploy you can instead create
-# an "Application" with build type Dockerfile — same env vars.
+# cpanel-mail-mcp (fork ruralhackers) — conector IMAP multicuenta para Langdock.
 #
-#   CPANEL_HOST=mail.tudominio.com docker compose up -d --build
-#   curl -s localhost:8080/health    # -> ok
+#   cp .env.example .env   # y rellena MCP_USERS_KEY, MCP_PUBLIC_URL, MCP_SIGNUP_CODE
+#   docker compose up -d --build
+#   curl -s 127.0.0.1:8080/health    # -> ok
+#
+# Detrás de un proxy HTTPS sin buffering (MCP usa SSE). Alta manual de un usuario:
+#   docker compose exec cpanel-mail-mcp cpanel-mail-mcp admin add-user --email X --host mail.X
 services:
   cpanel-mail-mcp:
     build: .
-    image: cpanel-mail-mcp:0.7.1
+    image: cpanel-mail-mcp:0.8.0
     restart: unless-stopped
     environment:
-      # Callers (n8n) send X-Email-User + X-Email-Password on every request.
-      MCP_AUTH_MODE: credentials
-      CPANEL_HOST: ${CPANEL_HOST:?set CPANEL_HOST, e.g. mail.tudominio.com}
-      # Only these address domains may log in (recommended).
-      MCP_ALLOWED_EMAIL_DOMAINS: ${MCP_ALLOWED_EMAIL_DOMAINS:-}
-      # Extra shared secret, sent as X-API-Key (recommended if exposed publicly).
-      MCP_API_KEY: ${MCP_API_KEY:-}
-      # IANA zone for send_invite times without an offset.
-      MCP_DEFAULT_TIMEZONE: ${MCP_DEFAULT_TIMEZONE:-}
-      # cPanel defaults; change if your server differs.
-      CPANEL_IMAP_PORT: ${CPANEL_IMAP_PORT:-993}
-      CPANEL_SMTP_PORT: ${CPANEL_SMTP_PORT:-465}
-      CPANEL_SENT_FOLDER: ${CPANEL_SENT_FOLDER:-INBOX.Sent}
-      CPANEL_DRAFTS_FOLDER: ${CPANEL_DRAFTS_FOLDER:-INBOX.Drafts}
+      # Cifra las contraseñas de users.json. Si se pierde, todos repiten el alta.
+      MCP_USERS_KEY: ${MCP_USERS_KEY:?set MCP_USERS_KEY (see README)}
+      # URL pública, la que se muestra en la página de alta.
+      MCP_PUBLIC_URL: ${MCP_PUBLIC_URL:?set MCP_PUBLIC_URL, e.g. https://imap-mcp.tudominio.com}
+      # Código del curso; vacío = /alta desactivada.
+      MCP_SIGNUP_CODE: ${MCP_SIGNUP_CODE:-}
+      # Opcional: exige params.confirm=<código> en los envíos.
+      EMAIL_SEND_CONFIRMATION_CODE: ${EMAIL_SEND_CONFIRMATION_CODE:-}
+      MCP_DEFAULT_TIMEZONE: ${MCP_DEFAULT_TIMEZONE:-Europe/Madrid}
+    volumes:
+      - mail-mcp-data:/data
     ports:
-      - "8080:8080"   # drop this on Dokploy; Traefik / the internal network reach port 8080
+      - "127.0.0.1:8080:8080"
+
+volumes:
+  mail-mcp-data:

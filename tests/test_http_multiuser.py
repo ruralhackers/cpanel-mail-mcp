@@ -12,14 +12,17 @@ import time
 import httpx
 import pytest
 
+from cpanel_mail_mcp import users as users_mod, vault
+
 from .test_server_wellknown import ROOT, _free_port
 
 HDRS = {"accept": "application/json, text/event-stream", "content-type": "application/json"}
 
 
 def _user(token: str, name: str) -> dict:
-    return {"token": token, "account": {"name": name, "user": f"{name}@example.com",
-                                        "password": "x", "host": "imap.invalid"}}
+    return users_mod.make_entry(token, {"name": name, "user": f"{name}@example.com",
+                                        "password": "x", "host": "imap.invalid"},
+                                vault.load_key())
 
 
 @pytest.fixture
@@ -97,7 +100,7 @@ def test_rotate_add_remove_apply_without_restart(srv):
     base, users_file = srv
     sa = _session(base, "tok-alice-000000000000")
     data = json.loads(users_file.read_text())
-    data[0]["token"] = "tok-alice-rotated-000000"
+    data[0] = _user("tok-alice-rotated-000000", "alice")
     data.append(_user("tok-carol-000000000000", "carol"))
     users_file.write_text(json.dumps(data))
 

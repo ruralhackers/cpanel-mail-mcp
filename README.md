@@ -1,4 +1,62 @@
-# cpanel-mail-mcp
+# cpanel-mail-mcp (fork ruralhackers)
+
+Fork de [rosauceda/cpanel-mail-mcp](https://github.com/rosauceda/cpanel-mail-mcp)
+adaptado como conector IMAP multicuenta de **ruralgpt.gal** (Langdock): cada
+alumno se da de alta en `/alta` con su buzón y pega su clave en Langdock. Las
+contraseñas van cifradas en reposo y de las claves solo se guarda el hash.
+
+## ruralgpt.gal / Langdock
+
+### 1. Arrancar el servidor (Docker)
+
+```bash
+# Clave de cifrado de users.json. Guárdala fuera del servidor: si se pierde,
+# todos los alumnos tienen que repetir el alta.
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+
+cat > .env <<'ENV'
+MCP_USERS_KEY=<la clave de arriba>
+MCP_PUBLIC_URL=https://imap-mcp.tudominio.com
+MCP_SIGNUP_CODE=<código del curso>   # sin él, /alta está desactivada
+ENV
+docker compose up -d --build
+curl -s 127.0.0.1:8080/health   # -> ok
+```
+
+Ponlo detrás de un proxy HTTPS (nginx + certbot, Cloudflare…) con el buffering
+desactivado (`proxy_buffering off;` en nginx): MCP Streamable HTTP usa SSE.
+
+### 2. Integración en Langdock (una vez, la hace un admin)
+
+* Integración MCP con URL `https://imap-mcp.tudominio.com/mcp`.
+* Autenticación por **API key**, cabecera `Authorization: Bearer {{ api_key }}`.
+* Hacerla visible al workspace.
+* Activar **Request confirmation** en las herramientas que envían o borran:
+  `send_email`, `reply_email`, `forward_email`, `send_invite`, `delete_email`,
+  `delete_folder`.
+
+### 3. Alta de cada alumno
+
+Cada alumno abre `https://imap-mcp.tudominio.com/alta`, introduce el código del
+curso y los datos de su buzón (mejor con una contraseña de aplicación). El
+servidor prueba el acceso IMAP (y SMTP si lo indica), detecta las carpetas de
+Enviados, Borradores y Papelera, y le muestra **una sola vez** su clave. En
+Langdock añade su conexión a la integración y pega la clave.
+
+Repetir el alta con el mismo correo sustituye la anterior y revoca la clave
+vieja (sirve para recuperar una clave perdida o cambiar la contraseña). Para
+dar de baja: `docker compose exec imap-mcp cpanel-mail-mcp admin remove-user --email …`.
+
+### RGPD
+
+Las asesorías manejan datos de clientes: aloja el servidor en la UE y firma el
+contrato de encargado del tratamiento. En el curso, cuentas de prueba, no
+buzones reales de trabajo.
+
+---
+
+Lo que sigue es la documentación del upstream, sin los modos eliminados en el
+fork (n8n/credentials, OAuth vía Cloudflare Access).
 
 MCP server for IMAP/SMTP email accounts — works with cPanel, Gmail
 (app passwords), Outlook, Fastmail, iCloud, or any provider that speaks
@@ -8,9 +66,9 @@ plain IMAP + SMTP.
 
 * **22 typed MCP tools** — one per operation with Pydantic input/output schemas, tool annotations (`readOnlyHint`/`destructiveHint`/…), and actionable error messages
 * **Full mailbox management** — read, search, threading, move, copy, flag, star, delete, reply, forward, drafts, calendar invites, folder create/delete/rename
-* **n8n / Docker ready** — `MCP_AUTH_MODE=credentials`: each client sends its own mailbox login per request, the server stores no passwords; Dockerfile for Dokploy
+* **Self-service signup** — `/alta` page verifies the mailbox, detects its folders and hands out an API key
+* **Encrypted at rest** — mailbox passwords Fernet-encrypted (`MCP_USERS_KEY`), only token hashes stored
 * **Multi-user server mode** — one instance, many users, each with their own bearer token and mailbox (per-request isolation; users.json changes apply without a restart)
-* **OAuth 2.1 via Cloudflare Access** — optional SSO (Google / GitHub / Email OTP) instead of shared bearer tokens; server exposes RFC 9728 protected-resource metadata, RFC 8414 AS metadata, and RFC 7591 DCR — proxied over CF Access SaaS OIDC
 * **Idempotent sends** — pass `idempotency_key` on `send_email`/`reply_email`/`forward_email`/`send_invite` to safely retry after client timeouts
 * **Per-caller rate limiting** — sliding window (send: 30/min, read: 300/min defaults), tunable per bucket
 * **Attachment size guard** — configurable cap (default 25 MB total)
@@ -103,14 +161,7 @@ Backwards compatible with 0.1.x installs. See [`.env.example`](.env.example).
 | `drafts_folder` | no       | `Drafts`  |
 | `save_to_sent`  | no       | `true`    |
 | `from_name`     | no       | —         |
-| `sso_emails`    | no       | `[]`      |
 | `trash_folder`  | no       | auto-detect (SPECIAL-USE `\Trash`, then common names) |
-
-`sso_emails` is a list of external identities (e.g. Google login addresses)
-that map to this account. Only used in OAuth mode: the JWT `email` claim is
-looked up here before falling back to `user`. Handy when the SSO identity
-differs from the mailbox address — e.g. logging in with `me@gmail.com` to
-access `me@company.com`.
 
 ### Loading a dev `.env`
 
@@ -225,52 +276,14 @@ attachments on the original are re-attached to the forward.
 ### Pick an account (multi-account setup)
 
 Every tool accepts an optional `account` param; omit it to use the first
-configured account. In multi-user OAuth mode this field is ignored — the
-account is chosen by the caller's bearer token or SSO email.
+configured account. In multi-user mode this field is ignored — the
+account is chosen by the caller's bearer token.
 
 ## Run as an HTTP server (LXC / VPS / homelab)
 
 By default `cpanel-mail-mcp` runs over **stdio** — your MCP client
 launches it per session. To run it 24/7 as a shared HTTPS endpoint,
 you have two shapes:
-
-### Docker / Dokploy + n8n (credentials mode)
-
-The image runs in `MCP_AUTH_MODE=credentials`: every request carries the
-mailbox login, so there are no users to register and **no passwords stored
-on the server**. Each n8n credential is one mailbox.
-
-```bash
-docker build -t cpanel-mail-mcp .
-docker run -d -p 8080:8080 \
-  -e CPANEL_HOST=mail.tudominio.com \
-  -e MCP_ALLOWED_EMAIL_DOMAINS=tudominio.com \
-  cpanel-mail-mcp
-```
-
-On **Dokploy**: create an *Application* from this repo with build type
-**Dockerfile**, set the env vars below, and either keep it internal (n8n on the
-same Dokploy reaches it as `http://<app-name>:8080/mcp`) or add a domain.
-
-| env var                     | required | purpose |
-|-----------------------------|----------|---------|
-| `CPANEL_HOST`               | **yes**  | your IMAP/SMTP server (`CPANEL_IMAP_HOST`/`CPANEL_SMTP_HOST` to split) |
-| `MCP_ALLOWED_EMAIL_DOMAINS` | recommended | comma list of address domains allowed to log in |
-| `MCP_API_KEY`               | if public | extra shared secret, sent as `X-API-Key` |
-| `MCP_CREDENTIAL_CACHE_SECONDS` | no    | how long a verified login is cached (default 600) |
-| `CPANEL_IMAP_PORT` / `CPANEL_SMTP_PORT` / `CPANEL_SENT_FOLDER` / `CPANEL_DRAFTS_FOLDER` / `CPANEL_TRASH_FOLDER` | no | same defaults as the cPanel setup |
-
-In n8n: **AI Agent → Tool → MCP Client Tool**
-
-* Endpoint: `http://<app-name>:8080/mcp` (internal) or `https://mcp.tudominio.com/mcp`
-* Server Transport: **HTTP Streamable**
-* Authentication: **Multiple Headers Auth** → `X-Email-User` = the mailbox,
-  `X-Email-Password` = its password (plus `X-API-Key` if you set one)
-* Tools to include: **All** (22 tools)
-
-`Authorization: Basic base64(user:password)` works as well. A login is checked
-against IMAP once and cached; wrong passwords are throttled per mailbox (5 per
-15 min) and globally, so the endpoint can't be used to guess passwords.
 
 ### Multi-user (recommended for a team)
 
@@ -280,7 +293,7 @@ server enforces that they can only touch their own mailbox. Setup:
 ```bash
 # on the server (Debian/Ubuntu LXC as root)
 apt install -y curl      # if not present
-curl -fsSL https://raw.githubusercontent.com/rosauceda/cpanel-mail-mcp/main/deploy/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ruralhackers/cpanel-mail-mcp/main/deploy/install.sh | bash
 
 # after logging out and back in (so $EMAIL_USERS_FILE is exported):
 systemctl enable --now cpanel-mail-mcp
@@ -315,57 +328,13 @@ Endpoints:
 * `POST /mcp` — MCP Streamable HTTP transport (requires bearer token)
 * `GET  /health` — plain `ok` for reverse-proxy probes
 
-### OAuth 2.1 via Cloudflare Access (optional, for MCP clients that require OAuth)
-
-Adds SSO on top of the multi-user mode. Cloudflare Access SaaS OIDC does the
-actual user login (Google / GitHub / Email OTP); the server verifies the
-resulting JWT and maps `email` → account. Also exposes:
-
-* `GET /.well-known/oauth-protected-resource` (RFC 9728) — root and `/mcp` path-suffixed
-* `GET /.well-known/oauth-authorization-server` (RFC 8414) — composed metadata that adds a `registration_endpoint`
-* `POST /register` (RFC 7591 Dynamic Client Registration) — returns the pre-configured CF client credentials so DCR-only clients can register
-* `WWW-Authenticate: Bearer realm="mcp", resource_metadata="..."` on 401 responses
-
-Env vars to enable:
-
-| var                              | purpose                                    |
-|----------------------------------|--------------------------------------------|
-| `CF_ACCESS_AUD`                  | audience tag / SaaS app Client ID          |
-| `CF_ACCESS_OIDC_ISSUER`          | full CF OIDC issuer URL                    |
-| `MCP_OAUTH_UPSTREAM_ISSUER`      | same as above (enables the DCR proxy)      |
-| `MCP_OAUTH_CLIENT_ID`            | SaaS app Client ID                         |
-| `MCP_OAUTH_CLIENT_SECRET`        | SaaS app Client Secret                     |
-| `MCP_RESOURCE_URL`               | public URL of this server                  |
-
-Full setup (CF dashboard config, systemd env file, ingress) →
-[`deploy/README.md`](deploy/README.md#cloudflare-access-oidc-optional-but-recommended-for-team-use).
-
 ## Client compatibility
 
 | Client                                          | Auth mode                       | Status |
 |-------------------------------------------------|---------------------------------|--------|
 | Claude Code CLI (`claude mcp add --transport http … -H "Authorization: Bearer …"`) | Multi-user bearer                | ✅ Works |
-| Claude Code CLI + OAuth (`--client-id/--client-secret`) | OAuth 2.1 with static credentials | ✅ Works |
 | Anthropic Messages API (`mcp_servers` + `authorization_token`) | Static bearer, no OAuth flow    | ✅ Works |
-| claude.ai Custom Connector (web)                | OAuth 2.1 via CF Access OIDC    | ⚠️ Beta — see below |
-
-### claude.ai Custom Connector — known issue
-
-Custom Connectors is still marked BETA. Earlier versions (≤0.6.x) exposed a
-single `email` dispatcher tool with a generic `params: dict`; Anthropic's
-frontend rejected the setup with an opaque `ofid_...` reference before
-opening the OAuth browser. In 0.7.0 the surface changed to 22 individually
-typed tools with `outputSchema` and annotations, which may help.
-
-If setup still fails:
-
-* Fill in the **OAuth Client ID** and **Secreto del cliente OAuth** fields
-  from your CF Access SaaS app manually (leaving them empty relies on DCR,
-  which we proxy but Claude's frontend may still fail on).
-* Contact Anthropic support with the exact `ofid_...` reference from the
-  error toast — only they can look up what specifically failed.
-* Meanwhile use the Claude Code CLI (works fully) or the Messages API with
-  a static `authorization_token`.
+| Langdock (MCP integration, API key header)      | Multi-user bearer               | ✅ Works |
 
 ## Send gate (recommended when an agent has this tool)
 

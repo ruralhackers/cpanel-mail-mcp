@@ -1,4 +1,4 @@
-"""End-to-end HTTP smoke: /health, /.well-known metadata, 401 with WWW-Authenticate.
+"""End-to-end HTTP smoke: /health, 401 with WWW-Authenticate, no OAuth endpoints.
 
 Uses a real uvicorn server on a private port + urllib requests. No mocks of
 the network layer.
@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from cpanel_mail_mcp import users as users_mod, vault
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -29,13 +31,10 @@ def _free_port() -> int:
 def running_server(tmp_path):
     port = _free_port()
     users_file = tmp_path / "users.json"
-    users_file.write_text(json.dumps([{
-        "token": "test-token-1234567890",
-        "account": {
-            "name": "x", "user": "u@v.com", "password": "p",
-            "smtp_host": "s", "imap_host": "i",
-        },
-    }]))
+    users_file.write_text(json.dumps([users_mod.make_entry("test-token-1234567890", {
+        "name": "x", "user": "u@v.com", "password": "p",
+        "smtp_host": "s", "imap_host": "i",
+    }, vault.load_key())]))
     env = {
         **os.environ,
         "EMAIL_USERS_FILE": str(users_file),
@@ -43,7 +42,6 @@ def running_server(tmp_path):
         "MCP_HOST": "127.0.0.1",
         "MCP_PORT": str(port),
         "MCP_ALLOWED_HOSTS": "127.0.0.1,localhost",
-        "MCP_RESOURCE_URL": f"http://127.0.0.1:{port}",
     }
     proc = subprocess.Popen(
         [sys.executable, "-m", "cpanel_mail_mcp"],
@@ -72,26 +70,9 @@ def test_health(running_server):
     assert body == b"ok"
 
 
-def test_protected_resource_metadata(running_server):
-    port = running_server
-    body = urllib.request.urlopen(
-        f"http://127.0.0.1:{port}/.well-known/oauth-protected-resource"
-    ).read()
-    doc = json.loads(body)
-    assert doc["resource"] == f"http://127.0.0.1:{port}"
-    assert doc["bearer_methods_supported"] == ["header"]
 
 
-def test_path_suffixed_metadata_also_works(running_server):
-    port = running_server
-    body = urllib.request.urlopen(
-        f"http://127.0.0.1:{port}/.well-known/oauth-protected-resource/mcp"
-    ).read()
-    doc = json.loads(body)
-    assert "resource" in doc
-
-
-def test_mcp_without_auth_returns_401_with_resource_metadata(running_server):
+def test_mcp_without_auth_returns_401(running_server):
     port = running_server
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}/mcp", method="POST",
@@ -104,7 +85,44 @@ def test_mcp_without_auth_returns_401_with_resource_metadata(running_server):
         pytest.fail("expected 401")
     except urllib.error.HTTPError as e:
         assert e.code == 401
-        wa = e.headers.get("www-authenticate", "")
-        assert "Bearer" in wa
-        assert "resource_metadata=" in wa
-        assert "/.well-known/oauth-protected-resource" in wa
+        assert e.headers.get("www-authenticate", "") == 'Bearer realm="mcp"'
+
+
+def _status(url: str, method: str = "GET") -> int:
+    try:
+        return urllib.request.urlopen(urllib.request.Request(url, method=method, data=b"" if method == "POST" else None)).status
+    except urllib.error.HTTPError as e:
+        return e.code
+
+
+def test_oauth_endpoints_are_gone(running_server):
+    port = running_server
+    assert _status(f"http://127.0.0.1:{port}/.well-known/oauth-protected-resource") == 401
+    assert _status(f"http://127.0.0.1:{port}/register", "POST") == 401
+
+
+def test_alta_disabled_without_code(running_server):
+    assert _status(f"http://127.0.0.1:{running_server}/alta") == 401
+
+
+def test_alta_enabled_with_code(tmp_path):
+    port = _free_port()
+    env = {**os.environ, "EMAIL_USERS_FILE": str(tmp_path / "users.json"), "MCP_TRANSPORT": "http",
+           "MCP_HOST": "127.0.0.1", "MCP_PORT": str(port), "MCP_SIGNUP_CODE": "c",
+           "MCP_PUBLIC_URL": f"http://127.0.0.1:{port}"}
+    proc = subprocess.Popen([sys.executable, "-m", "cpanel_mail_mcp"], env=env, cwd=str(ROOT),
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(30):
+            try:
+                body = urllib.request.urlopen(f"http://127.0.0.1:{port}/alta", timeout=0.5).read()
+                break
+            except Exception:
+                time.sleep(0.2)
+        else:
+            raise RuntimeError("server never came up")
+        assert b'name="codigo"' in body
+        assert _status(f"http://127.0.0.1:{port}/mcp", "POST") == 401
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)

@@ -6,11 +6,13 @@ import base64
 import mimetypes
 import os
 import smtplib
+import socket
 import ssl
 from email.message import EmailMessage
 from email.utils import formataddr, formatdate, getaddresses, make_msgid
 from pathlib import Path
 
+from . import netguard
 from .accounts import Account
 from .errors import AttachmentPathNotAllowed, AttachmentTooLarge
 from .ics import build_ics
@@ -49,18 +51,61 @@ def _attachment_limit_bytes() -> int:
     return max(1, mb) * 1024 * 1024
 
 
+class _PinnedSMTP(smtplib.SMTP):
+    """SMTP (STARTTLS) that dials an already-checked address (see `netguard`)."""
+
+    def __init__(self, ip: str, *args, **kwargs) -> None:
+        self._pinned_ip = ip
+        super().__init__(*args, **kwargs)
+
+    def _get_socket(self, host, port, timeout):
+        return socket.create_connection((self._pinned_ip, port), timeout, self.source_address)
+
+
+class _PinnedSMTP_SSL(smtplib.SMTP_SSL):
+    """SMTP over implicit TLS that dials an already-checked address; the
+    certificate is still verified against the host name."""
+
+    def __init__(self, ip: str, *args, **kwargs) -> None:
+        self._pinned_ip = ip
+        super().__init__(*args, **kwargs)
+
+    def _get_socket(self, host, port, timeout):
+        sock = socket.create_connection((self._pinned_ip, port), timeout, self.source_address)
+        return self.context.wrap_socket(sock, server_hostname=self._host)
+
+
+def _login(s: smtplib.SMTP, a: Account) -> None:
+    """smtplib.login encodes credentials as ASCII; send AUTH PLAIN in UTF-8
+    (RFC 4616) ourselves when they aren't ASCII."""
+    if a.user.isascii() and a.password.isascii():
+        s.login(a.user, a.password)
+        return
+    s.ehlo_or_helo_if_needed()
+    blob = base64.b64encode(b"\0" + a.user.encode() + b"\0" + a.password.encode()).decode()
+    code, resp = s.docmd("AUTH", "PLAIN " + blob)
+    if code != 235:
+        raise smtplib.SMTPAuthenticationError(code, resp)
+
+
 def _connect(a: Account) -> smtplib.SMTP | smtplib.SMTP_SSL:
     ctx = ssl.create_default_context()
+    ip = netguard.pin(a.smtp_host, a.smtp_port)
     if a.smtp_port == 465:
-        s: smtplib.SMTP | smtplib.SMTP_SSL = smtplib.SMTP_SSL(
-            a.smtp_host, a.smtp_port, context=ctx, timeout=30
-        )
+        if ip is None:
+            s: smtplib.SMTP | smtplib.SMTP_SSL = smtplib.SMTP_SSL(
+                a.smtp_host, a.smtp_port, context=ctx, timeout=30)
+        else:
+            s = _PinnedSMTP_SSL(ip, a.smtp_host, a.smtp_port, context=ctx, timeout=30)
     else:
-        s = smtplib.SMTP(a.smtp_host, a.smtp_port, timeout=30)
+        if ip is None:
+            s = smtplib.SMTP(a.smtp_host, a.smtp_port, timeout=30)
+        else:
+            s = _PinnedSMTP(ip, a.smtp_host, a.smtp_port, timeout=30)
         s.ehlo()
         s.starttls(context=ctx)
         s.ehlo()
-    s.login(a.user, a.password)
+    _login(s, a)
     return s
 
 

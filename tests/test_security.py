@@ -5,7 +5,7 @@ import stat
 
 import pytest
 
-from cpanel_mail_mcp import errors, smtp_ops, users as users_mod
+from cpanel_mail_mcp import errors, smtp_ops, users as users_mod, vault
 from cpanel_mail_mcp.accounts import Account
 from cpanel_mail_mcp.errors import AttachmentPathNotAllowed
 
@@ -71,13 +71,38 @@ def test_save_users_is_atomic_and_0600(tmp_path, monkeypatch):
 def test_users_store_reloads_on_change(tmp_path, monkeypatch):
     p = tmp_path / "users.json"
     monkeypatch.setenv("EMAIL_USERS_FILE", str(p))
+    f = vault.load_key()
     acct = {"user": "a@x.com", "password": "p", "host": "h"}
-    users_mod.save_users([{"token": "old-token-xxxxxxxxxxxx", "account": acct}])
+    users_mod.save_users([users_mod.make_entry("old-token-xxxxxxxxxxxx", acct, f)])
     store = users_mod.UsersStore(p)
-    assert set(store.get()) == {"old-token-xxxxxxxxxxxx"}
-    users_mod.save_users([{"token": "new-token-xxxxxxxxxxxx", "account": acct}])
-    assert set(store.get()) == {"new-token-xxxxxxxxxxxx"}
+    assert set(store.get()) == {vault.hash_token("old-token-xxxxxxxxxxxx")}
+    users_mod.save_users([users_mod.make_entry("new-token-xxxxxxxxxxxx", acct, f)])
+    assert set(store.get()) == {vault.hash_token("new-token-xxxxxxxxxxxx")}
     p.write_text("{broken")  # a bad edit keeps the last good map
-    assert set(store.get()) == {"new-token-xxxxxxxxxxxx"}
+    assert set(store.get()) == {vault.hash_token("new-token-xxxxxxxxxxxx")}
     p.unlink()
     assert store.get() == {}
+
+
+def test_users_store_keeps_last_good_map_on_wrong_key(tmp_path, monkeypatch):
+    from cryptography.fernet import Fernet
+    p = tmp_path / "users.json"
+    monkeypatch.setenv("EMAIL_USERS_FILE", str(p))
+    acct = {"user": "a@x.com", "password": "p", "host": "h"}
+    users_mod.save_users([users_mod.make_entry("tok-a-xxxxxxxxxxxxxxx", acct, vault.load_key())])
+    store = users_mod.UsersStore(p)
+    other = Fernet(Fernet.generate_key())
+    users_mod.save_users([users_mod.make_entry("tok-b-xxxxxxxxxxxxxxx", acct, other)])
+    assert set(store.get()) == {vault.hash_token("tok-a-xxxxxxxxxxxxxxx")}
+    with pytest.raises(ValueError):
+        users_mod.load_users(p)
+
+
+@pytest.mark.parametrize("allow,expected", [("", True), ("1", False)])
+def test_multi_user_http_enables_netguard(tmp_path, monkeypatch, allow, expected):
+    from cpanel_mail_mcp import netguard, server
+    monkeypatch.setenv("EMAIL_USERS_FILE", str(tmp_path / "users.json"))
+    monkeypatch.setenv("MCP_ALLOW_PRIVATE_MAIL_HOSTS", allow)
+    monkeypatch.setattr(netguard, "_enabled", False)
+    server.create_http_app()
+    assert netguard._enabled is expected

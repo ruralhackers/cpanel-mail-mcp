@@ -10,13 +10,7 @@ import argparse
 import getpass
 import sys
 
-from . import users as users_mod
-
-
-def _shorten(token: str) -> str:
-    if len(token) <= 12:
-        return token
-    return f"{token[:6]}…{token[-4:]}"
+from . import users as users_mod, vault
 
 
 def _find_index(all_users: list[dict], email: str) -> int:
@@ -62,9 +56,7 @@ def cmd_add_user(args: argparse.Namespace) -> int:
     }
     if args.trash_folder:
         account_dict["trash_folder"] = args.trash_folder
-    if args.sso_email:
-        account_dict["sso_emails"] = [e.strip() for e in args.sso_email if e.strip()]
-    all_users.append({"token": token, "account": account_dict})
+    all_users.append(users_mod.make_entry(token, account_dict, vault.load_key()))
     users_mod.save_users(all_users)
     print(f"added user: {args.email} (active now — the running server reloads users.json)")
     print()
@@ -88,9 +80,9 @@ def cmd_list_users(_: argparse.Namespace) -> int:
     print(f"{len(all_users)} user(s):")
     for u in all_users:
         acct = u.get("account", {})
-        token = u.get("token", "")
+        h = u.get("token_sha256", "")
         print(
-            f"  {acct.get('user', '?'):40s}  token={_shorten(token)}  "
+            f"  {acct.get('user', '?'):40s}  token_sha256={h[:8]}…  "
             f"imap={acct.get('imap_host', '?')}  smtp={acct.get('smtp_host', '?')}"
         )
     return 0
@@ -108,37 +100,6 @@ def cmd_remove_user(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_add_sso_email(args: argparse.Namespace) -> int:
-    all_users = users_mod.load_users_raw()
-    idx = _find_index(all_users, args.email)
-    if idx < 0:
-        print(f"user {args.email!r} not found.", file=sys.stderr)
-        return 1
-    acct = all_users[idx].setdefault("account", {})
-    current = list(acct.get("sso_emails") or [])
-    for e in args.sso_email:
-        e = e.strip()
-        if e and e not in current:
-            current.append(e)
-    acct["sso_emails"] = current
-    users_mod.save_users(all_users)
-    print(f"{args.email}: sso_emails = {current}")
-    return 0
-
-
-def cmd_remove_sso_email(args: argparse.Namespace) -> int:
-    all_users = users_mod.load_users_raw()
-    idx = _find_index(all_users, args.email)
-    if idx < 0:
-        print(f"user {args.email!r} not found.", file=sys.stderr)
-        return 1
-    acct = all_users[idx].setdefault("account", {})
-    current = [e for e in (acct.get("sso_emails") or []) if e.strip() != args.sso_email.strip()]
-    acct["sso_emails"] = current
-    users_mod.save_users(all_users)
-    print(f"{args.email}: sso_emails = {current}")
-    return 0
-
 
 def cmd_rotate_token(args: argparse.Namespace) -> int:
     all_users = users_mod.load_users_raw()
@@ -147,7 +108,8 @@ def cmd_rotate_token(args: argparse.Namespace) -> int:
         print(f"user {args.email!r} not found.", file=sys.stderr)
         return 1
     token = users_mod.new_token()
-    all_users[idx]["token"] = token
+    all_users[idx].pop("token", None)
+    all_users[idx]["token_sha256"] = vault.hash_token(token)
     users_mod.save_users(all_users)
     print(f"new token for {args.email}:")
     print(f"  {token}")
@@ -183,14 +145,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add.add_argument("--from-name", dest="from_name", help='display name in the "From:" header')
     add.add_argument("--name", help="friendly handle (defaults to the email)")
-    add.add_argument(
-        "--sso-email",
-        action="append",
-        default=[],
-        help="SSO identity email (from OAuth/OIDC login) that maps to this "
-        "account. Pass multiple times to allow several. Only used in CF "
-        "Access OIDC mode; if omitted, JWT email must match --email.",
-    )
     add.set_defaults(func=cmd_add_user)
 
     ls = sub.add_parser("list-users", help="list all configured users")
@@ -203,21 +157,6 @@ def build_parser() -> argparse.ArgumentParser:
     rot = sub.add_parser("rotate-token", help="issue a new bearer token, revoke the old one")
     rot.add_argument("--email", required=True)
     rot.set_defaults(func=cmd_rotate_token)
-
-    add_sso = sub.add_parser("add-sso-email", help="attach an SSO identity email to an existing account")
-    add_sso.add_argument("--email", required=True, help="account's mailbox email (must exist)")
-    add_sso.add_argument(
-        "--sso-email",
-        action="append",
-        required=True,
-        help="SSO email to allow (repeat to add several)",
-    )
-    add_sso.set_defaults(func=cmd_add_sso_email)
-
-    rm_sso = sub.add_parser("remove-sso-email", help="detach an SSO identity email from an account")
-    rm_sso.add_argument("--email", required=True)
-    rm_sso.add_argument("--sso-email", required=True)
-    rm_sso.set_defaults(func=cmd_remove_sso_email)
 
     return p
 

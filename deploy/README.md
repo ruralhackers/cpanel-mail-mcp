@@ -11,7 +11,7 @@ several people can share the same install with their own mailboxes.
 
 * `install.sh` — one-command installer for a fresh Debian/Ubuntu LXC or VM
 * `cpanel-mail-mcp.service` — reference systemd unit
-* Admin CLI on the server: `cpanel-mail-mcp admin {add-user,list-users,remove-user,rotate-token,add-sso-email,remove-sso-email}`
+* Admin CLI on the server: `cpanel-mail-mcp admin {add-user,list-users,remove-user,rotate-token}`
 
 Once installed, the server listens on `127.0.0.1:8080` (set `MCP_HOST=0.0.0.0`
 if `cloudflared` runs on another LXC/VM — and give this LXC a static IP or a
@@ -33,7 +33,7 @@ multi-user mode.
 # on the LXC, as root. Base image may lack curl:
 apt install -y curl
 
-curl -fsSL https://raw.githubusercontent.com/rosauceda/cpanel-mail-mcp/main/deploy/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ruralhackers/cpanel-mail-mcp/main/deploy/install.sh | bash
 ```
 
 Then reload the shell (or `source /etc/profile.d/cpanel-mail-mcp.sh`) so
@@ -74,7 +74,6 @@ Full `add-user` options:
 | `--no-save-to-sent` | (save enabled)   |                                    |
 | `--from-name`       | —                | display name in From:              |
 | `--name`            | email            | friendly handle                    |
-| `--sso-email`       | —                | SSO login email mapped to this mailbox (repeatable) |
 
 ## Start the service
 
@@ -128,25 +127,16 @@ claude mcp list | grep cpanel     # should show ✔ Connected
 | `MCP_TRANSPORT`                | `stdio`        | `stdio` \| `http` \| `streamable-http` \| `sse` |
 | `MCP_HOST`                     | `127.0.0.1`    | bind host (HTTP mode)                          |
 | `MCP_PORT`                     | `8080`         | bind port                                      |
-| `MCP_AUTH_MODE`                | tokens         | `credentials` = callers send their mailbox login per request (no users.json; see the main README) |
-| `CPANEL_HOST`                  | —              | credentials mode: IMAP/SMTP server for every login |
-| `MCP_ALLOWED_EMAIL_DOMAINS`    | —              | credentials mode: address domains allowed to log in |
-| `MCP_API_KEY`                  | —              | credentials mode: extra shared secret required as `X-API-Key` |
-| `MCP_CREDENTIAL_CACHE_SECONDS` | `600`          | credentials mode: cache for verified logins    |
-| `EMAIL_USERS_FILE`             | —              | path to users.json → **multi-user mode**       |
+| `EMAIL_USERS_FILE`             | —              | path to users.json → **multi-user mode** (the file may not exist yet) |
+| `MCP_USERS_KEY`                | —              | **required in multi-user mode**: Fernet key that encrypts mailbox passwords in users.json |
+| `MCP_SIGNUP_CODE`              | —              | course code; enables the `/alta` signup page   |
+| `MCP_ALLOW_PRIVATE_MAIL_HOSTS` | —              | multi-user mode refuses mail hosts that resolve to private/loopback/CGNAT addresses (and dials the checked IP); set truthy to allow them, e.g. a mail server on your LAN |
+| `MCP_PUBLIC_URL`               | —              | public base URL shown on the signup page (required with `MCP_SIGNUP_CODE`) |
 | `MCP_AUTH_TOKEN`               | —              | single-tenant bearer (ignored if users.json exists) |
 | `MCP_ALLOW_NO_AUTH`            | —              | set truthy to disable auth (dev only)          |
 | `MCP_ALLOWED_HOSTS`            | —              | comma-list of Host headers to accept (**required behind a reverse proxy** — e.g. `mcp.yourdomain.com`) |
 | `MCP_ALLOWED_ORIGINS`          | —              | comma-list of Origin headers to accept (browser clients only) |
 | `MCP_DISABLE_DNS_REBINDING_PROTECTION` | —      | set truthy to bypass Host/Origin checks entirely |
-| `CF_ACCESS_AUD`                | —              | SaaS OIDC app Client ID (or the self-hosted app's Audience tag) |
-| `CF_ACCESS_OIDC_ISSUER`        | —              | SaaS OIDC issuer, `https://<team>.cloudflareaccess.com/cdn-cgi/access/sso/oidc/<app_uid>` |
-| `CF_ACCESS_JWKS_URL`           | `<issuer>/jwks` | override the JWKS URL                         |
-| `CF_ACCESS_TEAM_DOMAIN`        | —              | legacy self-hosted Access app (instead of `CF_ACCESS_OIDC_ISSUER`) |
-| `MCP_RESOURCE_URL`             | —              | e.g. `https://mcp.yourdomain.com` — public URL of this MCP server (used in `oauth-protected-resource` metadata) |
-| `MCP_OAUTH_UPSTREAM_ISSUER`    | —              | enables the DCR proxy (same value as `CF_ACCESS_OIDC_ISSUER`) |
-| `MCP_OAUTH_CLIENT_ID` / `MCP_OAUTH_CLIENT_SECRET` | — | SaaS app credentials handed out by `POST /register` |
-| `MCP_OAUTH_AUTHORIZATION_SERVERS` | —           | comma-list of AS URLs advertised when the DCR proxy is off |
 | `MCP_ATTACHMENT_DIR`           | —              | allow `path` attachments only under this dir (HTTP mode: unset = disabled) |
 | `MCP_MAX_ATTACHMENT_MB`        | `25`           | total attachment size cap per message          |
 | `MCP_IMAP_TIMEOUT`             | `30`           | seconds before an IMAP socket operation gives up |
@@ -207,108 +197,17 @@ userdel -r cpanelmcp
 rm -rf /etc/cpanel-mail-mcp
 ```
 
-## Cloudflare Access OIDC (optional but recommended for team use)
-
-Turns Cloudflare Access into the OAuth 2.1 authorization server. Users log
-in with Google/GitHub/email OTP; the MCP server just verifies the JWT that
-CF Access mints and maps `email` → account in `users.json`. This is what
-lets you register the server as a Custom Connector on claude.ai (which
-requires OAuth, not bearer tokens).
-
-### 1. Configure the Cloudflare Access application
-
-In `one.dash.cloudflare.com` → **Access** → **Applications** → **Add** → **SaaS** → **OIDC**:
-
-* Application name: `cpanel-mail-mcp`
-* Redirect URLs (both):
-  - `https://claude.ai/api/mcp/auth_callback`
-  - `http://127.0.0.1:35333/callback`   (Claude Code CLI default callback)
-* Scopes: `openid`, `email`, `profile`
-* Policy: `Include` → `Emails` (your team) or `Emails ending in @yourdomain.com`
-* Login methods: Google, GitHub, or one-time email PIN
-
-After saving, note:
-- **Client ID** and **Client Secret** (used by MCP clients)
-- **AUD (Application Audience tag)** — long hex string, from the app's Overview page
-- **Team domain** — `<team>.cloudflareaccess.com`, top-left of Zero Trust dashboard
-- **Endpoints** — CF shows `/authorization`, `/token`, `/certs` URLs. You can compose them or fetch the full metadata at `https://<team>.cloudflareaccess.com/cdn-cgi/access/sso/oidc/<app_uid>/.well-known/openid-configuration`
-
-### 2. Update the server systemd unit
-
-Add these env vars to `/etc/systemd/system/cpanel-mail-mcp.service`:
-
-```
-Environment=CF_ACCESS_AUD=<client-id>
-Environment=CF_ACCESS_OIDC_ISSUER=https://<team>.cloudflareaccess.com/cdn-cgi/access/sso/oidc/<client-id>
-Environment=MCP_RESOURCE_URL=https://mcp.yourdomain.com
-Environment=MCP_ALLOWED_HOSTS=mcp.yourdomain.com
-EnvironmentFile=/etc/cpanel-mail-mcp/oauth-proxy.env
-```
-
-and in `/etc/cpanel-mail-mcp/oauth-proxy.env` (mode 0600) the DCR proxy:
-
-```
-MCP_OAUTH_UPSTREAM_ISSUER=https://<team>.cloudflareaccess.com/cdn-cgi/access/sso/oidc/<client-id>
-MCP_OAUTH_CLIENT_ID=<client-id>
-MCP_OAUTH_CLIENT_SECRET=<client-secret>
-```
-
-Note: with the DCR proxy on, `POST /register` hands the client secret to
-anyone who asks — that's how DCR-only clients get it. Treat it as public:
-what actually protects the server is the Access **policy** (who can log in),
-the app's **redirect URL allowlist**, and the JWT `aud` check. Rotating the
-secret alone doesn't lock anyone out.
-
-Reload and restart:
-
-```bash
-systemctl daemon-reload && systemctl restart cpanel-mail-mcp
-journalctl -u cpanel-mail-mcp -n 10 --no-pager | grep -i "CF Access"
-# esperado: "CF Access OIDC ENABLED: team=… aud=… (JWKS …)"
-```
-
-### 3. Verify metadata is public
-
-```bash
-curl -sf https://mcp.yourdomain.com/.well-known/oauth-protected-resource | python3 -m json.tool
-```
-
-Should return the resource + authorization_servers JSON.
-
-### 4. Register on the client side
-
-**Claude custom connector (web / mobile):** in claude.ai → Settings →
-Connectors → Add custom connector, put the MCP URL. Claude will discover the
-CF Access OIDC endpoints via the well-known metadata and drive the OAuth
-flow. On first use, the user is redirected to CF Access, logs in with SSO,
-and returns with an access token.
-
-**Claude Code CLI:**
-
-```bash
-claude mcp add --transport http --scope user cpanel-mail \
-  https://mcp.yourdomain.com/mcp \
-  --client-id <CF_CLIENT_ID> \
-  --client-secret            # prompts for the secret
-```
-
-First run opens a browser to CF Access for login; token cached locally.
-
-### 5. Backward compat during migration
-
-The existing bearer token flow **still works** in 0.5.0 — the middleware
-tries CF Access JWT first, then falls back to opaque bearer from
-`users.json`. You can migrate users one by one without downtime.
-
 ## Threat model / notes
 
 * **Bearer tokens are passwords for your mailbox.** Store them in a
   password manager (yours and each user's), share via a secure channel,
   rotate immediately if leaked (`admin rotate-token`).
-* **Passwords sit at rest in `/etc/cpanel-mail-mcp/users.json`** (mode 0600,
-  owned by `cpanelmcp`). This is fine for a trusted, closed team; NOT
-  fine as a public service. For public use you'd want at-rest encryption
-  and a signup flow — that's a bigger project.
+* **users.json holds no secrets in clear**: mailbox passwords are
+  Fernet-encrypted with `MCP_USERS_KEY` and tokens are stored as SHA-256.
+  Whoever has both the file and the key can read every password: keep the
+  key in `/etc/cpanel-mail-mcp/secrets.env` (0600) and out of backups of
+  users.json. Entries written before the fork (plaintext `token`/`password`)
+  are rejected at load: re-add those users.
 * **Per-request account isolation is enforced server-side.** Every HTTP
   request is authenticated and mapped to its own account; `params.account`
   is ignored in multi-user mode, and an MCP session can only be used by the
@@ -316,11 +215,8 @@ tries CF Access JWT first, then falls back to opaque bearer from
 * **Remote callers can't read server files.** `path` attachments are
   disabled in HTTP mode unless `MCP_ATTACHMENT_DIR` confines them to one
   directory — never point it at `/etc/cpanel-mail-mcp`.
-* **Cloudflare Tunnel** gives you TLS, DDoS protection, and the option to
-  layer **Cloudflare Access** in front (email/GitHub SSO). If you add
-  Access, use **Service Tokens** (`CF-Access-Client-Id` /
-  `CF-Access-Client-Secret` headers) so MCP clients can auth
-  non-interactively.
+* **Cloudflare Tunnel** gives you TLS and DDoS protection in front of the
+  server.
 * The server user (`cpanelmcp`) is unprivileged and hardened by
   `ProtectSystem=strict`, `NoNewPrivileges`, `MemoryDenyWriteExecute`,
   restricted address families.

@@ -167,7 +167,8 @@ class FakeIMAP:
         out = []
         for f in self.s.folders.values():
             flags = "\\HasNoChildren" + (f" {f.special}" if f.special else "")
-            out.append(f'({flags}) "." {f.name}'.encode())
+            name = f'"{f.name}"' if " " in f.name else f.name  # real servers quote these
+            out.append(f'({flags}) "." {name}'.encode())
         return "OK", out
 
     def select(self, mailbox="INBOX", readonly=False):
