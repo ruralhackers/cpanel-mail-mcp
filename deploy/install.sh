@@ -42,11 +42,11 @@ if ! id "$USER_NAME" &>/dev/null; then
 fi
 install -d -m 750 -o "$USER_NAME" -g "$USER_NAME" "$CONFIG_DIR"
 
-echo "==> pipx install cpanel-mail-mcp (as $USER_NAME)"
+echo "==> pipx install cpanel-mail-mcp from the ruralhackers fork (as $USER_NAME)"
 # runuser (util-linux) works on minimal images that don't ship sudo
 runuser -u "$USER_NAME" -- env HOME="$STATE_DIR" PATH="$STATE_DIR/.local/bin:/usr/bin:/bin" bash -lc '
   set -e
-  pipx install --force --pip-args="--no-cache-dir" cpanel-mail-mcp
+  pipx install --force --pip-args="--no-cache-dir" git+https://github.com/ruralhackers/cpanel-mail-mcp.git
 '
 BIN="$STATE_DIR/.local/bin/cpanel-mail-mcp"
 [[ -x "$BIN" ]] || { echo "no encontré el binario en $BIN" >&2; exit 1; }
@@ -62,11 +62,21 @@ fi
 # convenience symlink so operators can run `cpanel-mail-mcp admin …` from root
 ln -sf "$BIN" /usr/local/bin/cpanel-mail-mcp
 
-# expose EMAIL_USERS_FILE to root's shell so the admin CLI knows where to write
-if ! grep -q 'EMAIL_USERS_FILE' /etc/profile.d/cpanel-mail-mcp.sh 2>/dev/null; then
+# encryption key for users.json (generated once, never overwritten)
+if [ ! -f "$CONFIG_DIR/secrets.env" ]; then
+  # same format as Fernet.generate_key(): urlsafe base64 of 32 random bytes
+  KEY=$(python3 -c "import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())")
+  ( umask 077; printf 'MCP_USERS_KEY=%s\n' "$KEY" > "$CONFIG_DIR/secrets.env" )
+  chown root:"$USER_NAME" "$CONFIG_DIR/secrets.env"; chmod 0640 "$CONFIG_DIR/secrets.env"
+  echo "    generated $CONFIG_DIR/secrets.env — back up MCP_USERS_KEY somewhere safe"
+fi
+
+# expose EMAIL_USERS_FILE + MCP_USERS_KEY to root's shell for the admin CLI
+if ! grep -q 'secrets.env' /etc/profile.d/cpanel-mail-mcp.sh 2>/dev/null; then
   cat > /etc/profile.d/cpanel-mail-mcp.sh <<PROFILE
-# Point the admin CLI at the deploy's users.json
+# Point the admin CLI at the deploy's users.json and its key
 export EMAIL_USERS_FILE=$USERS_FILE
+[ -r $CONFIG_DIR/secrets.env ] && set -a && . $CONFIG_DIR/secrets.env && set +a
 PROFILE
 fi
 
@@ -85,6 +95,8 @@ Environment=MCP_TRANSPORT=streamable-http
 Environment=MCP_HOST=$BIND_HOST
 Environment=MCP_PORT=$BIND_PORT
 Environment=EMAIL_USERS_FILE=$USERS_FILE
+# MCP_USERS_KEY (and optionally MCP_SIGNUP_CODE / MCP_PUBLIC_URL)
+EnvironmentFile=$CONFIG_DIR/secrets.env
 # Behind a reverse proxy (Cloudflare Tunnel, nginx, caddy)? Add your public
 # hostname(s) here or requests come back as 421 Misdirected Request.
 # Environment=MCP_ALLOWED_HOSTS=mcp.yourdomain.com
@@ -92,12 +104,6 @@ Environment=EMAIL_USERS_FILE=$USERS_FILE
 # cloudflared on another LXC/VM? Bind all interfaces instead of 127.0.0.1:
 # Environment=MCP_HOST=0.0.0.0
 
-# ── Cloudflare Access OIDC (optional; enables OAuth 2.1 for Claude Custom
-#    Connector). Set these once you've created a SaaS OIDC app in CF Access.
-# Environment=CF_ACCESS_AUD=<client-id>
-# Environment=CF_ACCESS_OIDC_ISSUER=https://<team>.cloudflareaccess.com/cdn-cgi/access/sso/oidc/<client-id>
-# Environment=MCP_RESOURCE_URL=https://mcp.yourdomain.com
-# EnvironmentFile=$CONFIG_DIR/oauth-proxy.env   # MCP_OAUTH_UPSTREAM_ISSUER/CLIENT_ID/CLIENT_SECRET
 ExecStart=$BIN
 Restart=on-failure
 RestartSec=3
