@@ -31,7 +31,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import BeforeValidator, Field
 
-from . import idempotency, imap_ops, rate_limit, smtp_ops
+from . import idempotency, imap_ops, rate_limit, smtp_ops, vault
 from . import users as users_mod
 from .accounts import Account, get_account, load_accounts
 from .errors import SendGateBlocked, UnknownAccount
@@ -798,13 +798,9 @@ async def _send_401(send, detail: str = "unauthorized") -> None:
 
 
 def _user_by_token(users: dict[str, Account], token: str) -> Account | None:
-    """Constant-time compare against every token (small teams → cheap)."""
-    tb = token.encode()
-    found = None
-    for t, acct in users.items():
-        if hmac.compare_digest(t.encode(), tb):
-            found = acct
-    return found
+    """`users` is keyed by sha256(token): a dict lookup on the hash leaks
+    nothing useful about the token itself."""
+    return users.get(vault.hash_token(token))
 
 
 def _is_public_path(path: str) -> bool:
@@ -934,8 +930,9 @@ def create_http_app(transport: str = "streamable-http"):
 
     if users_mod.is_multi_user():
         users_file = users_mod.users_path()
-        users_mod.load_users(users_file)  # fail fast on a malformed file
-        store = users_mod.UsersStore(users_file)
+        fernet = vault.load_key()  # fail fast without a key…
+        users_mod.load_users(users_file, fernet)  # …or on a malformed / undecryptable file
+        store = users_mod.UsersStore(users_file, fernet)
         if not store.get():
             log.warning(
                 "%s has no users yet — add one with `cpanel-mail-mcp admin add-user`; "

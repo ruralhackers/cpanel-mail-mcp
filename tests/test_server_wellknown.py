@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from cpanel_mail_mcp import users as users_mod, vault
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -29,13 +31,10 @@ def _free_port() -> int:
 def running_server(tmp_path):
     port = _free_port()
     users_file = tmp_path / "users.json"
-    users_file.write_text(json.dumps([{
-        "token": "test-token-1234567890",
-        "account": {
-            "name": "x", "user": "u@v.com", "password": "p",
-            "smtp_host": "s", "imap_host": "i",
-        },
-    }]))
+    users_file.write_text(json.dumps([users_mod.make_entry("test-token-1234567890", {
+        "name": "x", "user": "u@v.com", "password": "p",
+        "smtp_host": "s", "imap_host": "i",
+    }, vault.load_key())]))
     env = {
         **os.environ,
         "EMAIL_USERS_FILE": str(users_file),

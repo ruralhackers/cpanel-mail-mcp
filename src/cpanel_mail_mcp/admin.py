@@ -10,13 +10,7 @@ import argparse
 import getpass
 import sys
 
-from . import users as users_mod
-
-
-def _shorten(token: str) -> str:
-    if len(token) <= 12:
-        return token
-    return f"{token[:6]}…{token[-4:]}"
+from . import users as users_mod, vault
 
 
 def _find_index(all_users: list[dict], email: str) -> int:
@@ -62,7 +56,7 @@ def cmd_add_user(args: argparse.Namespace) -> int:
     }
     if args.trash_folder:
         account_dict["trash_folder"] = args.trash_folder
-    all_users.append({"token": token, "account": account_dict})
+    all_users.append(users_mod.make_entry(token, account_dict, vault.load_key()))
     users_mod.save_users(all_users)
     print(f"added user: {args.email} (active now — the running server reloads users.json)")
     print()
@@ -86,9 +80,9 @@ def cmd_list_users(_: argparse.Namespace) -> int:
     print(f"{len(all_users)} user(s):")
     for u in all_users:
         acct = u.get("account", {})
-        token = u.get("token", "")
+        h = u.get("token_sha256", "")
         print(
-            f"  {acct.get('user', '?'):40s}  token={_shorten(token)}  "
+            f"  {acct.get('user', '?'):40s}  token_sha256={h[:8]}…  "
             f"imap={acct.get('imap_host', '?')}  smtp={acct.get('smtp_host', '?')}"
         )
     return 0
@@ -114,7 +108,8 @@ def cmd_rotate_token(args: argparse.Namespace) -> int:
         print(f"user {args.email!r} not found.", file=sys.stderr)
         return 1
     token = users_mod.new_token()
-    all_users[idx]["token"] = token
+    all_users[idx].pop("token", None)
+    all_users[idx]["token_sha256"] = vault.hash_token(token)
     users_mod.save_users(all_users)
     print(f"new token for {args.email}:")
     print(f"  {token}")
