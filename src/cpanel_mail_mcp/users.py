@@ -162,5 +162,19 @@ class UsersStore:
         return self._users
 
 
+_upsert_lock = threading.Lock()
+
+
+def upsert_user(entry: dict) -> bool:
+    """Add `entry`, replacing any entry for the same mailbox (case-insensitive).
+    Returns True when an existing entry was replaced (its token is revoked)."""
+    user = entry["account"]["user"].lower()
+    with _upsert_lock:
+        all_users = load_users_raw()
+        kept = [u for u in all_users if u.get("account", {}).get("user", "").lower() != user]
+        save_users(kept + [entry])
+        return len(kept) != len(all_users)
+
+
 def new_token() -> str:
     return secrets.token_urlsafe(36)

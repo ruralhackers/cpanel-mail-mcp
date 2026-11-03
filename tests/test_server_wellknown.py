@@ -99,3 +99,30 @@ def test_oauth_endpoints_are_gone(running_server):
     port = running_server
     assert _status(f"http://127.0.0.1:{port}/.well-known/oauth-protected-resource") == 401
     assert _status(f"http://127.0.0.1:{port}/register", "POST") == 401
+
+
+def test_alta_disabled_without_code(running_server):
+    assert _status(f"http://127.0.0.1:{running_server}/alta") == 401
+
+
+def test_alta_enabled_with_code(tmp_path):
+    port = _free_port()
+    env = {**os.environ, "EMAIL_USERS_FILE": str(tmp_path / "users.json"), "MCP_TRANSPORT": "http",
+           "MCP_HOST": "127.0.0.1", "MCP_PORT": str(port), "MCP_SIGNUP_CODE": "c",
+           "MCP_PUBLIC_URL": f"http://127.0.0.1:{port}"}
+    proc = subprocess.Popen([sys.executable, "-m", "cpanel_mail_mcp"], env=env, cwd=str(ROOT),
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(30):
+            try:
+                body = urllib.request.urlopen(f"http://127.0.0.1:{port}/alta", timeout=0.5).read()
+                break
+            except Exception:
+                time.sleep(0.2)
+        else:
+            raise RuntimeError("server never came up")
+        assert b'name="codigo"' in body
+        assert _status(f"http://127.0.0.1:{port}/mcp", "POST") == 401
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)

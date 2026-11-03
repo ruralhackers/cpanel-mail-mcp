@@ -940,6 +940,14 @@ def create_http_app(transport: str = "streamable-http"):
             )
         app = UnifiedAuthASGI(app, users=store)
         log.info("multi-user mode: %d user(s) loaded from %s", len(store.get()), store.path)
+        signup_code = os.environ.get("MCP_SIGNUP_CODE", "").strip()
+        if signup_code:
+            public_url = os.environ.get("MCP_PUBLIC_URL", "").strip()
+            if not public_url:
+                raise SystemExit("MCP_SIGNUP_CODE needs MCP_PUBLIC_URL (e.g. https://mcp.example.com).")
+            from .signup import SignupASGI
+            app = SignupASGI(app, code=signup_code, fernet=fernet, public_url=public_url)
+            log.info("signup page ENABLED at %s/alta", public_url.rstrip("/"))
     else:
         single_token = os.environ.get("MCP_AUTH_TOKEN", "").strip()
         if single_token:
